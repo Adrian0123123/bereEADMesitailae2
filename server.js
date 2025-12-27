@@ -1,7 +1,9 @@
 const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
-const { addonBuilder } = require("stremio-addon-sdk");
+
+// YA NO USAMOS EL SDK PARA EVITAR ERRORES DE VALIDACIÓN
+// const { addonBuilder } = require("stremio-addon-sdk"); 
 
 const app = express();
 app.use(cors());
@@ -13,7 +15,7 @@ const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 const REFERER = "https://epicplayplay.cfd/";
 
 // ==========================================
-// 1. LÓGICA DEL PROXY (Igual que antes)
+// 1. LÓGICA DEL PROXY (Robar el video)
 // ==========================================
 let cachedToken = null;
 let tokenExpiry = 0;
@@ -55,28 +57,27 @@ async function getServerUrl() {
 }
 
 // ==========================================
-// 2. DEFINICIÓN DEL MANIFIESTO
+// 2. DEFINICIÓN MANUAL DEL MANIFIESTO (JSON PURO)
 // ==========================================
-// Solo usamos el builder para generar el JSON del manifiesto, no para manejar rutas.
-const builder = new addonBuilder({
+// Al hacerlo así, el SDK no puede quejarse de que falta el handler.
+const MANIFEST = {
     id: "org.adrian.carrera.manual",
-    version: "3.0.0",
+    version: "3.0.5",
     name: "Carrera Viva (Final)",
-    description: "Conexión directa V5",
+    description: "Conexión directa V6",
+    logo: "https://img.freepik.com/vector-gratis/fondo-carreras-formula-1-bandera-cuadros_1017-31486.jpg",
     resources: ["catalog", "meta", "stream"],
     types: ["tv"],
     catalogs: [{ type: "tv", id: "carrera_catalog", name: "Carrera TV" }]
-});
-
-const MANIFEST = builder.getInterface().manifest;
+};
 
 // ==========================================
-// 3. RUTAS EXPRESS MANUALES (Aquí arreglamos el error)
+// 3. RUTAS EXPRESS MANUALES
 // ==========================================
 
 // A. Ruta Base
 app.get("/", (req, res) => {
-    res.send("✅ Servidor V5 Activo. Añade /manifest.json en Stremio.");
+    res.send("✅ Servidor V6 Activo. Añade /manifest.json en Stremio.");
 });
 
 // B. Ruta Manifiesto
@@ -85,8 +86,7 @@ app.get("/manifest.json", (req, res) => {
     res.json(MANIFEST);
 });
 
-// C. Ruta CATÁLOGO (Lo que muestra el icono en el menú)
-// Stremio pide: /catalog/tv/carrera_catalog.json
+// C. Ruta CATÁLOGO
 app.get("/catalog/tv/carrera_catalog.json", (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.json({
@@ -100,8 +100,7 @@ app.get("/catalog/tv/carrera_catalog.json", (req, res) => {
     });
 });
 
-// D. Ruta META (Detalles al hacer clic)
-// Stremio pide: /meta/tv/carrera_viva.json
+// D. Ruta META
 app.get("/meta/tv/carrera_viva.json", (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.json({
@@ -116,14 +115,10 @@ app.get("/meta/tv/carrera_viva.json", (req, res) => {
     });
 });
 
-// E. Ruta STREAM (El enlace del video)
-// Stremio pide: /stream/tv/carrera_viva.json
+// E. Ruta STREAM
 app.get("/stream/tv/carrera_viva.json", async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    
-    // Aquí generamos el enlace que pasa por NUESTRO proxy
     const myUrl = `${BASE_URL}/playlist.m3u8`;
-    
     res.json({
         streams: [{
             title: "🔴 LIVE | 1080p | Proxy Mode",
@@ -133,7 +128,7 @@ app.get("/stream/tv/carrera_viva.json", async (req, res) => {
 });
 
 // ==========================================
-// 4. RUTAS DEL PROXY (Video Real)
+// 4. RUTAS DEL PROXY
 // ==========================================
 
 app.get("/playlist.m3u8", async (req, res) => {
@@ -141,7 +136,7 @@ app.get("/playlist.m3u8", async (req, res) => {
         const token = await getToken();
         const targetUrl = await getServerUrl();
         
-        console.log(`🔌 Conectando a: ${targetUrl}`); // Log para ver qué pasa
+        console.log(`🔌 Conectando a: ${targetUrl}`);
 
         const response = await axios.get(targetUrl, {
             headers: { 
@@ -155,7 +150,7 @@ app.get("/playlist.m3u8", async (req, res) => {
         let playlist = response.data;
         const encodedToken = encodeURIComponent(token);
         
-        // Reemplazar enlaces rusos por enlaces a nuestro servidor
+        // Reemplazar enlaces
         playlist = playlist.replace(/(https?:\/\/[^\s]+)/g, (match) => {
             return `${BASE_URL}/segment?target=${encodeURIComponent(match)}&t=${encodedToken}`;
         });
@@ -190,11 +185,11 @@ app.get("/segment", async (req, res) => {
         res.set("Access-Control-Allow-Origin", "*");
         response.data.pipe(res);
     } catch (e) {
-        // console.error("Segment Error"); // Descomentar solo si hay muchos fallos
+        // console.error("Segment Error"); 
         res.status(500).send("Error");
     }
 });
 
 app.listen(PORT, () => {
-    console.log(`✅ Servidor V5 Manual corriendo en ${BASE_URL}`);
+    console.log(`✅ Servidor V6 Manual corriendo en ${BASE_URL}`);
 });
