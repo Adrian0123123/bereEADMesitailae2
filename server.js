@@ -1,28 +1,27 @@
 const { addonBuilder, serveHTTP } = require("stremio-addon-sdk");
 const axios = require("axios");
 
-// Headers estándar para parecer un navegador real
-const UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-const Referer = "https://epicplayplay.cfd/";
+// Headers "Fijos" para simular ser un PC con Windows
+const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+const REFERER = "https://epicplayplay.cfd/";
+const ORIGIN = "https://epicplayplay.cfd";
 
 const builder = new addonBuilder({
-    id: "org.adrian.carrera.auto",
-    version: "1.0.2",
-    name: "Carrera Viva (Smart-Link)",
-    description: "Con auto-token y server-lookup dinámico",
+    id: "org.adrian.carrera.final",
+    version: "1.0.3",
+    name: "Carrera Viva (Full Headers)",
+    description: "Con inyección completa de headers y cookies",
     resources: ["catalog", "meta", "stream"],
     types: ["tv"],
-    catalogs: [
-        {
-            type: "tv",
-            id: "carrera_catalog",
-            name: "Carrera TV",
-            extra: [{ name: "search", isRequired: false }]
-        }
-    ]
+    catalogs: [{
+        type: "tv",
+        id: "carrera_catalog",
+        name: "Carrera TV",
+        extra: [{ name: "search", isRequired: false }]
+    }]
 });
 
-// --- MENU (Igual que antes) ---
+// --- MENÚ Y DETALLES (Igual que antes) ---
 builder.defineCatalogHandler((args) => {
     if (args.id === "carrera_catalog") {
         return Promise.resolve({
@@ -31,7 +30,7 @@ builder.defineCatalogHandler((args) => {
                 type: "tv",
                 name: "Carrera Viva Directo",
                 poster: "https://img.freepik.com/vector-gratis/fondo-carreras-formula-1-bandera-cuadros_1017-31486.jpg",
-                description: "Emisión en directo F1"
+                description: "Emisión Directa F1"
             }]
         });
     }
@@ -53,59 +52,50 @@ builder.defineMetaHandler((args) => {
     return Promise.resolve({ meta: {} });
 });
 
-// --- LÓGICA DEL STREAM (Aquí está la mejora) ---
+// --- GENERADOR DE CLIENT TOKEN FALSO ---
+// El servidor pide una "huella digital". Vamos a crear una falsa pero válida.
+function generateFakeClientToken(channelKey) {
+    // Simulamos los datos que usa el script original para crear el token
+    const ts = Math.floor(Date.now() / 1000) + 3600; // Timestamp futuro
+    const screen = "1920x1080";
+    const fingerprint = `${USER_AGENT}|${screen}|UTC|en-US`;
+    const signData = `${channelKey}|ES|${ts}|${USER_AGENT}|${fingerprint}`;
+    // Convertimos a Base64 (btoa en navegador, Buffer en Node)
+    return Buffer.from(signData).toString('base64');
+}
+
+// --- LÓGICA DEL STREAM ---
 const TARGET_URL = "https://epicplayplay.cfd/premiumtv/daddyhd.php?id=premium537";
-const CHANNEL_ID = "premium537"; // El ID del canal que vimos en el HTML
+const CHANNEL_ID = "premium537"; 
 
 builder.defineStreamHandler(async (args) => {
     if (args.id === "carrera_viva_channel") {
         try {
-            console.log("🚀 Iniciando proceso de extracción...");
+            console.log("🚀 Iniciando extracción V3 (Full Headers)...");
 
-            // PASO 1: Obtener el TOKEN de la web HTML
-            // ------------------------------------------------
+            // 1. Obtener HTML y Token
             const responseHtml = await axios.get(TARGET_URL, {
-                headers: { "User-Agent": UserAgent, "Referer": Referer }
+                headers: { "User-Agent": USER_AGENT, "Referer": REFERER }
             });
             const html = responseHtml.data;
 
-            // Regex mejorado: Busca exactamente 'const AUTH_TOKEN = "..."'
-            // Esto es mucho más preciso que buscar solo "Bearer"
+            // Regex para buscar el Token
             const tokenRegex = /const\s+AUTH_TOKEN\s*=\s*["'](eyJ[^"']+)["']/;
-            const matchToken = html.match(tokenRegex);
+            const matchToken = html.match(tokenRegex) || html.match(/Bearer\s+(eyJ[^"']+)/);
+            
+            if (!matchToken) throw new Error("No se encontró el Token");
+            const freshToken = matchToken[1];
+            console.log("✅ Token:", freshToken.substring(0, 10) + "...");
 
-            if (!matchToken) {
-                console.error("❌ ERROR CRÍTICO: No encontré el AUTH_TOKEN en el HTML.");
-                // Intentamos un plan B de regex por si acaso
-                const fallbackRegex = /Bearer\s+(eyJ[a-zA-Z0-9-_]+\.[a-zA-Z0-9-_]+\.[a-zA-Z0-9-_]+)/;
-                const matchFallback = html.match(fallbackRegex);
-                if (!matchFallback) throw new Error("Token no encontrado ni con plan A ni B");
-                var freshToken = matchFallback[1];
-            } else {
-                var freshToken = matchToken[1];
-            }
-            console.log("✅ Token encontrado (inicio):", freshToken.substring(0, 10) + "...");
-
-
-            // PASO 2: Preguntar qué SERVIDOR usar (Server Lookup)
-            // ------------------------------------------------
-            // La web hace esto: fetch('https://chevy.giokko.ru/server_lookup?channel_id=premium537')
-            console.log("🌍 Consultando servidor activo...");
+            // 2. Server Lookup
             const lookupUrl = `https://chevy.giokko.ru/server_lookup?channel_id=${CHANNEL_ID}`;
-            
             const responseLookup = await axios.get(lookupUrl, {
-                headers: { "User-Agent": UserAgent, "Referer": Referer }
+                headers: { "User-Agent": USER_AGENT, "Referer": REFERER }
             });
-            
-            const serverKey = responseLookup.data.server_key; // Ej: "dokko1" o "top1"
-            console.log("✅ Servidor activo hoy:", serverKey);
+            const serverKey = responseLookup.data.server_key;
+            console.log("✅ Servidor:", serverKey);
 
-            // PASO 3: Construir la URL final del video
-            // ------------------------------------------------
-            // Lógica extraída del script original:
-            // si es 'top1/cdn' -> usa top1.kiko2.ru
-            // si no -> usa [serverKey]new.kiko2.ru
-            
+            // 3. Construir URL
             let finalUrl = "";
             if (serverKey === 'top1/cdn') {
                 finalUrl = `https://top1.kiko2.ru/top1/cdn/${CHANNEL_ID}/mono.css`;
@@ -113,10 +103,10 @@ builder.defineStreamHandler(async (args) => {
                 finalUrl = `https://${serverKey}new.kiko2.ru/${serverKey}/${CHANNEL_ID}/mono.css?.m3u8`;
             }
 
-            console.log("🔗 URL Generada:", finalUrl);
+            // 4. Generar Credenciales Extra (Aquí estaba el fallo antes)
+            const fakeClientToken = generateFakeClientToken(CHANNEL_ID);
 
-            // PASO 4: Devolver a Stremio
-            // ------------------------------------------------
+            // 5. Devolver Stream con TODOS los headers
             return {
                 streams: [
                     {
@@ -124,12 +114,17 @@ builder.defineStreamHandler(async (args) => {
                         url: finalUrl,
                         behaviorHints: {
                             notWebReady: true,
+                            // Stremio a veces ignora proxyHeaders en Android, pero es nuestra mejor baza
                             proxyHeaders: {
                                 "request": {
                                     "Authorization": `Bearer ${freshToken}`,
-                                    "Referer": Referer,
-                                    "Origin": "https://epicplayplay.cfd",
-                                    "User-Agent": UserAgent
+                                    "X-Channel-Key": CHANNEL_ID,
+                                    "X-Client-Token": fakeClientToken,
+                                    "X-User-Agent": USER_AGENT,
+                                    "Cookie": `eplayer_session=${freshToken}`, // ¡CRÍTICO!
+                                    "Referer": REFERER,
+                                    "Origin": ORIGIN,
+                                    "User-Agent": USER_AGENT
                                 }
                             }
                         }
@@ -139,8 +134,7 @@ builder.defineStreamHandler(async (args) => {
 
         } catch (error) {
             console.error("❌ ERROR:", error.message);
-            // Si falla, mostramos un error en Stremio
-            return { streams: [{ title: "⚠️ Error: " + error.message, url: "" }] };
+            return { streams: [] };
         }
     }
     return { streams: [] };
