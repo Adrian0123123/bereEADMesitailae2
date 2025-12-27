@@ -10,7 +10,9 @@ const PORT = process.env.PORT || 7000;
 const BASE_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
 
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-const REFERER = "https://epicplayplay.cfd/";
+// CAMBIO CLAVE: Usamos el dominio principal de la red DaddyLive
+const REFERER = "https://thedaddy.to/";
+const ORIGIN = "https://thedaddy.to";
 const CHANNEL_ID = "premium537";
 
 const agent = new https.Agent({ rejectUnauthorized: false });
@@ -18,8 +20,13 @@ const agent = new https.Agent({ rejectUnauthorized: false });
 // 1. OBTENER TOKEN
 async function getToken() {
     try {
+        // Hacemos la petición fingiendo venir de DaddyLive
         const response = await axios.get(`https://epicplayplay.cfd/premiumtv/daddyhd.php?id=${CHANNEL_ID}`, {
-            headers: { "User-Agent": USER_AGENT, "Referer": REFERER },
+            headers: { 
+                "User-Agent": USER_AGENT, 
+                "Referer": REFERER,
+                "Origin": ORIGIN
+            },
             httpsAgent: agent
         });
         const html = response.data;
@@ -32,72 +39,60 @@ async function getToken() {
     }
 }
 
-// 2. BUSCADOR DE URL (Sin Cookies)
+// 2. BUSCADOR DE URL
 async function getWorkingStreamUrl(token) {
     let servers = [];
-    
-    // Intento de Lookup Oficial
     try {
         const lookup = await axios.get(`https://chevy.giokko.ru/server_lookup?channel_id=${CHANNEL_ID}`, {
-            headers: { "User-Agent": USER_AGENT, "Referer": REFERER },
+            headers: { "User-Agent": USER_AGENT, "Referer": REFERER, "Origin": ORIGIN },
             httpsAgent: agent
         });
-        if(lookup.data.server_key) {
-            console.log(`ℹ️ Oficial: ${lookup.data.server_key}`);
-            servers.push(lookup.data.server_key);
-        }
+        if(lookup.data.server_key) servers.push(lookup.data.server_key);
     } catch (e) {}
 
-    // Lista completa de intentos
     const allServers = [...new Set([...servers, "dokko1", "dokko2", "top1", "chevy"])];
 
     for (const server of allServers) {
-        // Construimos las URLs posibles
         let urls = [];
         const clean = server.replace("/cdn", "");
         
-        // URL Tipo A: dokko1new.kiko2.ru
+        // Probamos las dos variantes de URL conocidas
         urls.push(`https://${clean}new.kiko2.ru/${clean}/${CHANNEL_ID}/mono.css?.m3u8`);
-        // URL Tipo B: top1...
         urls.push(`https://${clean}.kiko2.ru/${clean}/cdn/${CHANNEL_ID}/mono.css`);
 
         for (const url of urls) {
             try {
-                // PRUEBA SIN COOKIES, SOLO TOKEN
+                // RESTAURAMOS LA COOKIE (A veces es necesaria si el referer es correcto)
                 await axios.head(url, {
                     headers: { 
                         "User-Agent": USER_AGENT, 
                         "Referer": REFERER,
-                        "Origin": REFERER,
-                        "Authorization": `Bearer ${token}`
-                        // ¡COOKIE QUITADA!
+                        "Origin": ORIGIN,
+                        "Authorization": `Bearer ${token}`,
+                        "Cookie": `eplayer_session=${token}`
                     },
                     httpsAgent: agent,
-                    timeout: 4000
+                    timeout: 3500
                 });
-                
-                console.log(`✅ ¡CONECTADO!: ${url}`);
+                console.log(`✅ CONEXIÓN EXITOSA: ${url}`);
                 return url;
             } catch (e) {
-                const status = e.response ? e.response.status : 'timeout';
-                console.log(`❌ Fallo en ${server}: ${status}`); 
-                // Si sale 403 = IP Bloqueada o Token malo
-                // Si sale 404 = URL incorrecta
+                // Ignoramos errores para seguir probando
             }
         }
     }
-    throw new Error("Imposible conectar");
+    throw new Error("Bloqueo de IP detectado");
 }
 
 // 3. RUTAS EXPRESS
-app.get("/", (req, res) => res.send("✅ V9 Activo"));
+app.get("/", (req, res) => res.send("✅ V10 Activo (Referer DaddyLive)"));
 
 app.get("/manifest.json", (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.json({
-        id: "org.adrian.carrera.v9",
-        version: "3.3.0",
-        name: "Carrera Viva (No Cookie)",
+        id: "org.adrian.carrera.v10",
+        version: "3.4.0",
+        name: "Carrera Viva (Cloud Bypass)",
         resources: ["catalog", "meta", "stream"],
         types: ["tv"],
         catalogs: [{ type: "tv", id: "carrera_catalog", name: "Carrera TV" }]
@@ -116,10 +111,10 @@ app.get("/meta/tv/carrera_viva.json", (req, res) => {
 
 app.get("/stream/tv/carrera_viva.json", async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.json({ streams: [{ title: "🔴 LIVE | No-Cookie", url: `${BASE_URL}/playlist.m3u8` }] });
+    res.json({ streams: [{ title: "🔴 LIVE | Cloud-Bypass", url: `${BASE_URL}/playlist.m3u8` }] });
 });
 
-// 4. PROXY (SIN COOKIES)
+// 4. PROXY
 app.get("/playlist.m3u8", async (req, res) => {
     try {
         const token = await getToken();
@@ -131,7 +126,9 @@ app.get("/playlist.m3u8", async (req, res) => {
             headers: { 
                 "User-Agent": USER_AGENT, 
                 "Referer": REFERER, 
-                "Authorization": `Bearer ${token}`
+                "Origin": ORIGIN,
+                "Authorization": `Bearer ${token}`,
+                "Cookie": `eplayer_session=${token}`
             },
             httpsAgent: agent
         });
@@ -144,7 +141,7 @@ app.get("/playlist.m3u8", async (req, res) => {
         res.set("Access-Control-Allow-Origin", "*");
         res.send(playlist);
     } catch (e) {
-        console.error("Playlist Error:", e.message);
+        console.error("Proxy Error:", e.message);
         res.status(500).send("Error");
     }
 });
@@ -161,7 +158,9 @@ app.get("/segment", async (req, res) => {
             headers: { 
                 "User-Agent": USER_AGENT, 
                 "Referer": REFERER, 
-                "Authorization": `Bearer ${t}`
+                "Origin": ORIGIN,
+                "Authorization": `Bearer ${t}`,
+                "Cookie": `eplayer_session=${t}`
             },
             httpsAgent: agent
         });
@@ -173,4 +172,4 @@ app.get("/segment", async (req, res) => {
     }
 });
 
-app.listen(PORT, () => console.log(`✅ V9 Corriendo en ${BASE_URL}`));
+app.listen(PORT, () => console.log(`✅ V10 Corriendo en ${BASE_URL}`));
