@@ -2,9 +2,6 @@ const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
 
-// YA NO USAMOS EL SDK PARA EVITAR ERRORES DE VALIDACIÓN
-// const { addonBuilder } = require("stremio-addon-sdk"); 
-
 const app = express();
 app.use(cors());
 
@@ -13,9 +10,10 @@ const BASE_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
 
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const REFERER = "https://epicplayplay.cfd/";
+const CHANNEL_ID = "premium537";
 
 // ==========================================
-// 1. LÓGICA DEL PROXY (Robar el video)
+// 1. GESTIÓN DE TOKENS
 // ==========================================
 let cachedToken = null;
 let tokenExpiry = 0;
@@ -25,7 +23,7 @@ async function getToken() {
     if (cachedToken && now < tokenExpiry) return cachedToken;
     console.log("🔄 Renovando Token...");
     try {
-        const response = await axios.get("https://epicplayplay.cfd/premiumtv/daddyhd.php?id=premium537", {
+        const response = await axios.get(`https://epicplayplay.cfd/premiumtv/daddyhd.php?id=${CHANNEL_ID}`, {
             headers: { "User-Agent": USER_AGENT, "Referer": REFERER }
         });
         const html = response.data;
@@ -42,29 +40,76 @@ async function getToken() {
     }
 }
 
-async function getServerUrl() {
+// ==========================================
+// 2. BUSCADOR DE SERVIDOR (LA MEJORA V7)
+// ==========================================
+// Si el servidor oficial falla, probamos estos de reserva
+const FALLBACK_SERVERS = [
+    "dokko1", "dokko2", "dokko3", "top1", "chevy"
+];
+
+async function getWorkingStreamUrl(token) {
+    // 1. Preguntar al servidor oficial cuál toca hoy
+    let candidates = [];
     try {
-        const lookup = await axios.get("https://chevy.giokko.ru/server_lookup?channel_id=premium537", {
+        const lookup = await axios.get(`https://chevy.giokko.ru/server_lookup?channel_id=${CHANNEL_ID}`, {
             headers: { "User-Agent": USER_AGENT, "Referer": REFERER }
         });
         const key = lookup.data.server_key;
-        if (key === 'top1/cdn') return `https://top1.kiko2.ru/top1/cdn/premium537/mono.css`;
-        return `https://${key}new.kiko2.ru/${key}/premium537/mono.css?.m3u8`;
+        if(key) candidates.push(key);
     } catch (e) {
-        console.error("Lookup failed:", e.message);
-        return "https://dokko1new.kiko2.ru/dokko1/premium537/mono.css?.m3u8";
+        console.log("⚠️ Lookup falló, usando lista de reserva...");
     }
+
+    // Añadimos los de reserva por si el oficial miente o falla
+    candidates = [...candidates, ...FALLBACK_SERVERS];
+    // Eliminamos duplicados
+    candidates = [...new Set(candidates)];
+
+    console.log(`🔎 Probando servidores: ${candidates.join(", ")}`);
+
+    // 2. Probar uno por uno hasta que uno responda 200 OK
+    for (const server of candidates) {
+        let testUrl = "";
+        if (server === 'top1' || server === 'top1/cdn') {
+            testUrl = `https://top1.kiko2.ru/top1/cdn/${CHANNEL_ID}/mono.css`;
+        } else {
+            // Limpiamos el nombre por si viene sucio
+            const cleanServer = server.replace("/cdn", "");
+            testUrl = `https://${cleanServer}new.kiko2.ru/${cleanServer}/${CHANNEL_ID}/mono.css?.m3u8`;
+        }
+
+        try {
+            // Hacemos una petición ligera (HEAD o GET con rango pequeño) para ver si existe
+            await axios.get(testUrl, {
+                headers: { 
+                    "User-Agent": USER_AGENT, 
+                    "Referer": REFERER,
+                    "Authorization": `Bearer ${token}`,
+                    "Cookie": `eplayer_session=${token}`
+                },
+                timeout: 3000 // Solo esperamos 3 segundos por servidor
+            });
+            
+            console.log(`✅ Servidor encontrado: ${server}`);
+            return testUrl; // ¡Encontrado! Devolvemos este.
+        } catch (e) {
+            console.log(`❌ ${server} falló (${e.response ? e.response.status : 'timeout'})`);
+            // Si falla, el bucle continúa con el siguiente
+        }
+    }
+
+    throw new Error("Ningún servidor funciona ahora mismo");
 }
 
 // ==========================================
-// 2. DEFINICIÓN MANUAL DEL MANIFIESTO (JSON PURO)
+// 3. DEFINICIÓN DEL MANIFIESTO
 // ==========================================
-// Al hacerlo así, el SDK no puede quejarse de que falta el handler.
 const MANIFEST = {
-    id: "org.adrian.carrera.manual",
-    version: "3.0.5",
-    name: "Carrera Viva (Final)",
-    description: "Conexión directa V6",
+    id: "org.adrian.carrera.v7",
+    version: "3.1.0",
+    name: "Carrera Viva (Smart Failover)",
+    description: "Conexión V7 con búsqueda automática",
     logo: "https://img.freepik.com/vector-gratis/fondo-carreras-formula-1-bandera-cuadros_1017-31486.jpg",
     resources: ["catalog", "meta", "stream"],
     types: ["tv"],
@@ -72,71 +117,66 @@ const MANIFEST = {
 };
 
 // ==========================================
-// 3. RUTAS EXPRESS MANUALES
+// 4. RUTAS EXPRESS
 // ==========================================
 
-// A. Ruta Base
 app.get("/", (req, res) => {
-    res.send("✅ Servidor V6 Activo. Añade /manifest.json en Stremio.");
+    res.send("✅ Servidor V7 Activo (Smart Failover). Añade /manifest.json en Stremio.");
 });
 
-// B. Ruta Manifiesto
 app.get("/manifest.json", (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.json(MANIFEST);
 });
 
-// C. Ruta CATÁLOGO
 app.get("/catalog/tv/carrera_catalog.json", (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.json({
         metas: [{
             id: "carrera_viva",
             type: "tv",
-            name: "Carrera Viva (Directo)",
+            name: "Carrera Viva (F1)",
             poster: "https://img.freepik.com/vector-gratis/fondo-carreras-formula-1-bandera-cuadros_1017-31486.jpg",
-            description: "Emisión en directo vía Proxy"
+            description: "Directo con búsqueda automática de señal."
         }]
     });
 });
 
-// D. Ruta META
 app.get("/meta/tv/carrera_viva.json", (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.json({
         meta: {
             id: "carrera_viva",
             type: "tv",
-            name: "Carrera Viva (Directo)",
+            name: "Carrera Viva (F1)",
             poster: "https://img.freepik.com/vector-gratis/fondo-carreras-formula-1-bandera-cuadros_1017-31486.jpg",
-            background: "https://img.freepik.com/foto-gratis/coche-carreras-pista_1048-5244.jpg",
-            description: "Canal en vivo con bypass de seguridad."
+            background: "https://img.freepik.com/foto-gratis/coche-carreras-pista_1048-5244.jpg"
         }
     });
 });
 
-// E. Ruta STREAM
 app.get("/stream/tv/carrera_viva.json", async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     const myUrl = `${BASE_URL}/playlist.m3u8`;
     res.json({
         streams: [{
-            title: "🔴 LIVE | 1080p | Proxy Mode",
+            title: "🔴 LIVE | Auto-Server | 1080p",
             url: myUrl
         }]
     });
 });
 
 // ==========================================
-// 4. RUTAS DEL PROXY
+// 5. PROXY INTELIGENTE
 // ==========================================
 
 app.get("/playlist.m3u8", async (req, res) => {
     try {
         const token = await getToken();
-        const targetUrl = await getServerUrl();
+        // AQUÍ ESTÁ LA MAGIA: Buscamos la URL que sí funciona
+        const targetUrl = await getWorkingStreamUrl(token);
         
-        console.log(`🔌 Conectando a: ${targetUrl}`);
+        console.log(`🔌 Conectando stream real: ${targetUrl}`);
 
         const response = await axios.get(targetUrl, {
             headers: { 
@@ -150,7 +190,6 @@ app.get("/playlist.m3u8", async (req, res) => {
         let playlist = response.data;
         const encodedToken = encodeURIComponent(token);
         
-        // Reemplazar enlaces
         playlist = playlist.replace(/(https?:\/\/[^\s]+)/g, (match) => {
             return `${BASE_URL}/segment?target=${encodeURIComponent(match)}&t=${encodedToken}`;
         });
@@ -159,8 +198,8 @@ app.get("/playlist.m3u8", async (req, res) => {
         res.set("Access-Control-Allow-Origin", "*");
         res.send(playlist);
     } catch (e) {
-        console.error("Proxy Playlist Error:", e.message);
-        res.status(500).send("Error generating playlist");
+        console.error("Playlist Error:", e.message);
+        res.status(404).send("#EXTM3U\n#EXT-X-ERROR: Stream not found or offline");
     }
 });
 
@@ -185,11 +224,11 @@ app.get("/segment", async (req, res) => {
         res.set("Access-Control-Allow-Origin", "*");
         response.data.pipe(res);
     } catch (e) {
-        // console.error("Segment Error"); 
-        res.status(500).send("Error");
+        // console.error("Seg Error");
+        res.status(500).end();
     }
 });
 
 app.listen(PORT, () => {
-    console.log(`✅ Servidor V6 Manual corriendo en ${BASE_URL}`);
+    console.log(`✅ Servidor V7 (Smart Failover) corriendo en ${BASE_URL}`);
 });
