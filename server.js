@@ -1,37 +1,63 @@
 const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
+const { exec } = require("child_process");
 const https = require("https");
 
 const app = express();
 app.use(cors());
 
+// EN RENDER, EL PUERTO VIENE EN LA VARIABLE DE ENTORNO
 const PORT = process.env.PORT || 7000;
-const BASE_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
 
-const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-// CAMBIO CLAVE: Usamos el dominio principal de la red DaddyLive
-const REFERER = "https://thedaddy.to/";
-const ORIGIN = "https://thedaddy.to";
-const CHANNEL_ID = "premium537";
+// --- CONFIGURACIÓN EXACTA DE LA V21 LOCAL ---
+const TOKEN_ID = "537";           // ID para generar el token (Fix del error E4)
+const STREAM_ID = "premium537";   // ID para la lista m3u8
+const TARGET_PLAYLIST = `https://dokko1new.kiko2.ru/dokko1/${STREAM_ID}/mono.css`;
 
-const agent = new https.Agent({ rejectUnauthorized: false });
+// User-Agent idéntico al de Fiddler
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
 
-// 1. OBTENER TOKEN
+// --- MOTOR CURL (Adaptado para Linux/Render) ---
+function runCurl(url, headers = {}) {
+    return new Promise((resolve, reject) => {
+        // -s: silencioso, -L: seguir redirecciones, --insecure: saltar errores SSL
+        let cmd = `curl -s -L --insecure `;
+        
+        for (const [key, value] of Object.entries(headers)) {
+            // Escapamos comillas dobles para que el shell de Linux no explote
+            const safeValue = value.replace(/"/g, '\\"');
+            cmd += `-H "${key}: ${safeValue}" `;
+        }
+        
+        cmd += `"${url}"`;
+
+        // Aumentamos el buffer para listas grandes
+        exec(cmd, { encoding: 'buffer', maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
+            if (error) { 
+                console.error("CURL Error:", stderr ? stderr.toString() : error.message);
+                reject(error); 
+                return; 
+            }
+            resolve(stdout);
+        });
+    });
+}
+
+// 1. OBTENER TOKEN (Vía CURL)
 async function getToken() {
     try {
-        // Hacemos la petición fingiendo venir de DaddyLive
-        const response = await axios.get(`https://epicplayplay.cfd/premiumtv/daddyhd.php?id=${CHANNEL_ID}`, {
-            headers: { 
-                "User-Agent": USER_AGENT, 
-                "Referer": REFERER,
-                "Origin": ORIGIN
-            },
-            httpsAgent: agent
+        console.log(`☁️ Cloud: Generando token para ID ${TOKEN_ID}...`);
+        const buffer = await runCurl(`https://epicplayplay.cfd/premiumtv/daddyhd.php?id=${TOKEN_ID}`, {
+            "User-Agent": UA,
+            "Referer": "https://epicplayplay.cfd/"
         });
-        const html = response.data;
-        const match = html.match(/const\s+AUTH_TOKEN\s*=\s*["'](eyJ[^"']+)["']/) || html.match(/Bearer\s+(eyJ[^"']+)/);
-        if (!match) throw new Error("Token no encontrado");
+        
+        const html = buffer.toString();
+        const match = html.match(/const\s+AUTH_TOKEN\s*=\s*["'](eyJ[^"']+)["']/) || 
+                      html.match(/Bearer\s+(eyJ[^"']+)/);
+                      
+        if (!match) throw new Error("No se encontró token en la respuesta HTML");
         return match[1];
     } catch (e) {
         console.error("❌ Error Token:", e.message);
@@ -39,60 +65,21 @@ async function getToken() {
     }
 }
 
-// 2. BUSCADOR DE URL
-async function getWorkingStreamUrl(token) {
-    let servers = [];
-    try {
-        const lookup = await axios.get(`https://chevy.giokko.ru/server_lookup?channel_id=${CHANNEL_ID}`, {
-            headers: { "User-Agent": USER_AGENT, "Referer": REFERER, "Origin": ORIGIN },
-            httpsAgent: agent
-        });
-        if(lookup.data.server_key) servers.push(lookup.data.server_key);
-    } catch (e) {}
-
-    const allServers = [...new Set([...servers, "dokko1", "dokko2", "top1", "chevy"])];
-
-    for (const server of allServers) {
-        let urls = [];
-        const clean = server.replace("/cdn", "");
-        
-        // Probamos las dos variantes de URL conocidas
-        urls.push(`https://${clean}new.kiko2.ru/${clean}/${CHANNEL_ID}/mono.css?.m3u8`);
-        urls.push(`https://${clean}.kiko2.ru/${clean}/cdn/${CHANNEL_ID}/mono.css`);
-
-        for (const url of urls) {
-            try {
-                // RESTAURAMOS LA COOKIE (A veces es necesaria si el referer es correcto)
-                await axios.head(url, {
-                    headers: { 
-                        "User-Agent": USER_AGENT, 
-                        "Referer": REFERER,
-                        "Origin": ORIGIN,
-                        "Authorization": `Bearer ${token}`,
-                        "Cookie": `eplayer_session=${token}`
-                    },
-                    httpsAgent: agent,
-                    timeout: 3500
-                });
-                console.log(`✅ CONEXIÓN EXITOSA: ${url}`);
-                return url;
-            } catch (e) {
-                // Ignoramos errores para seguir probando
-            }
-        }
-    }
-    throw new Error("Bloqueo de IP detectado");
+// --- FUNCIÓN PARA DETECTAR LA URL DE RENDER ---
+function getBaseUrl(req) {
+    const protocol = req.headers['x-forwarded-proto'] || 'http';
+    const host = req.headers.host;
+    return `${protocol}://${host}`;
 }
 
-// 3. RUTAS EXPRESS
-app.get("/", (req, res) => res.send("✅ V10 Activo (Referer DaddyLive)"));
-
+// 2. MANIFIESTO STREMIO
 app.get("/manifest.json", (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.json({
-        id: "org.adrian.carrera.v10",
-        version: "3.4.0",
-        name: "Carrera Viva (Cloud Bypass)",
+        id: "org.adrian.cloud.v23",
+        version: "1.0.0",
+        name: "Carrera Viva (Cloud Fix)",
+        description: "Versión Cloud basada en la V21 local",
         resources: ["catalog", "meta", "stream"],
         types: ["tv"],
         catalogs: [{ type: "tv", id: "carrera_catalog", name: "Carrera TV" }]
@@ -111,65 +98,108 @@ app.get("/meta/tv/carrera_viva.json", (req, res) => {
 
 app.get("/stream/tv/carrera_viva.json", async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.json({ streams: [{ title: "🔴 LIVE | Cloud-Bypass", url: `${BASE_URL}/playlist.m3u8` }] });
+    const baseUrl = getBaseUrl(req);
+    res.json({ streams: [{ title: "🔴 LIVE | Render Cloud", url: `${baseUrl}/playlist.m3u8` }] });
 });
 
-// 4. PROXY
+// 3. PROCESADOR DE LISTA (CURL)
 app.get("/playlist.m3u8", async (req, res) => {
     try {
         const token = await getToken();
-        const targetUrl = await getWorkingStreamUrl(token);
-        
-        console.log(`🔌 Streaming: ${targetUrl}`);
+        if(!token) throw new Error("Fallo al obtener token");
 
-        const response = await axios.get(targetUrl, {
-            headers: { 
-                "User-Agent": USER_AGENT, 
-                "Referer": REFERER, 
-                "Origin": ORIGIN,
-                "Authorization": `Bearer ${token}`,
-                "Cookie": `eplayer_session=${token}`
-            },
-            httpsAgent: agent
+        console.log(`☁️ Cloud: Descargando lista m3u8...`);
+        const buffer = await runCurl(TARGET_PLAYLIST, {
+            "User-Agent": UA,
+            "Referer": "https://epicplayplay.cfd/",
+            "Origin": "https://epicplayplay.cfd",
+            "Authorization": `Bearer ${token}`
         });
 
-        let playlist = response.data;
+        let playlist = buffer.toString();
         const encodedToken = encodeURIComponent(token);
-        playlist = playlist.replace(/(https?:\/\/[^\s]+)/g, (match) => `${BASE_URL}/segment?target=${encodeURIComponent(match)}&t=${encodedToken}`);
+        const baseUrl = getBaseUrl(req); // Usamos la URL pública de Render
+        
+        // REESCRITURA LLAVE (Va al proxy tipo 'key')
+        playlist = playlist.replace(/URI="(https?:\/\/[^"]+)"/g, (match, url) => {
+            return `URI="${baseUrl}/proxy?target=${encodeURIComponent(url)}&t=${encodedToken}&type=key"`;
+        });
+
+        // REESCRITURA VIDEO (Va al proxy tipo 'video')
+        playlist = playlist.replace(/^(https?:\/\/[^\s]+)$/gm, (match) => {
+            return `${baseUrl}/proxy?target=${encodeURIComponent(match)}&t=${encodedToken}&type=video`;
+        });
 
         res.set("Content-Type", "application/vnd.apple.mpegurl");
         res.set("Access-Control-Allow-Origin", "*");
         res.send(playlist);
+
     } catch (e) {
-        console.error("Proxy Error:", e.message);
-        res.status(500).send("Error");
+        console.error("🔥 Error Playlist:", e.message);
+        res.status(500).send("#EXTM3U\n#EXT-X-ERROR: " + e.message);
     }
 });
 
-app.get("/segment", async (req, res) => {
-    const { target, t } = req.query;
-    if (!target) return res.status(400).send("Bad Request");
+// 4. PROXY HÍBRIDO (La joya de la corona)
+app.get("/proxy", async (req, res) => {
+    const { target, t, type } = req.query;
 
-    try {
-        const response = await axios({
-            method: 'get',
-            url: target,
-            responseType: 'stream',
-            headers: { 
-                "User-Agent": USER_AGENT, 
-                "Referer": REFERER, 
-                "Origin": ORIGIN,
-                "Authorization": `Bearer ${t}`,
-                "Cookie": `eplayer_session=${t}`
-            },
-            httpsAgent: agent
-        });
-        res.set("Content-Type", response.headers["content-type"]);
-        res.set("Access-Control-Allow-Origin", "*");
-        response.data.pipe(res);
-    } catch (e) {
-        res.status(500).end();
+    // --- CASO A: LLAVE (SEGURIDAD ALTA - USA CURL) ---
+    if (type === 'key') {
+        console.log(`🔐 Cloud: Pidiendo LLAVE a Rusia...`);
+        try {
+            const buffer = await runCurl(target, {
+                "User-Agent": UA,
+                "Referer": "https://epicplayplay.cfd/",
+                "Origin": "https://epicplayplay.cfd",
+                "Cookie": `eplayer_session=${t}`,
+                "Authorization": `Bearer ${t}` // ¡ESTO ES LO QUE FALTABA ANTES!
+            });
+
+            // Verificación de tamaño (El famoso error de 46 bytes)
+            if (buffer.length !== 16) {
+                console.log(`⚠️ ALERTA CLOUD: La llave mide ${buffer.length} bytes (Debería ser 16).`);
+                console.log(`   Contenido: "${buffer.toString()}"`);
+                // Si falla, es probable que la IP de Render esté bloqueada
+                return res.status(500).end(); 
+            }
+
+            console.log(`🔓 Cloud: ¡Llave OK! (16 bytes)`);
+            res.set("Access-Control-Allow-Origin", "*");
+            res.set("Content-Type", "application/octet-stream");
+            return res.send(buffer);
+
+        } catch (e) {
+            console.error("❌ Fallo Llave:", e.message);
+            return res.status(500).end();
+        }
+    }
+
+    // --- CASO B: VIDEO (VELOCIDAD ALTA - USA AXIOS) ---
+    if (type === 'video') {
+        try {
+            const response = await axios({
+                method: 'get',
+                url: target,
+                responseType: 'stream',
+                headers: { 
+                    "User-Agent": UA, 
+                    "Accept": "*/*" 
+                },
+                // Desactivamos SSL para evitar errores de certificados intermedios
+                httpsAgent: new https.Agent({ rejectUnauthorized: false }) 
+            });
+
+            res.set("Content-Type", "video/mp2t");
+            res.set("Access-Control-Allow-Origin", "*");
+            response.data.pipe(res);
+        } catch (e) {
+            // console.error("Error Video Segment (AWS)");
+            res.status(500).end();
+        }
     }
 });
 
-app.listen(PORT, () => console.log(`✅ V10 Corriendo en ${BASE_URL}`));
+app.listen(PORT, () => {
+    console.log(`✅ SERVIDOR CLOUD INICIADO EN PUERTO ${PORT}`);
+});
