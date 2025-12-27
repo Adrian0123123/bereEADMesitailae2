@@ -11,7 +11,7 @@ const PORT = process.env.PORT || 7000;
 
 const TOKEN_ID = "537";
 const STREAM_ID = "premium537";
-const TARGET_PLAYLIST = `https://dokko1new.kiko2.ru/dokko1/${STREAM_ID}/mono.css`;
+const TARGET_PLAYLIST = `https://r.jina.ai/https://dokko1new.kiko2.ru/dokko1/${STREAM_ID}/mono.css`;
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
 
 function runCurl(url, headers = {}) {
