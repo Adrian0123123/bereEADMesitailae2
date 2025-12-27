@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
+const https = require("https"); // Para saltar errores de certificado SSL
 
 const app = express();
 app.use(cors());
@@ -8,9 +9,22 @@ app.use(cors());
 const PORT = process.env.PORT || 7000;
 const BASE_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
 
+// USER AGENT REAL DE CHROME WINDOWS
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-const REFERER = "https://epicplayplay.cfd/";
+
+// Lista de referers permitidos (si uno falla, probamos otro)
+const REFERERS = [
+    "https://epicplayplay.cfd/",
+    "https://thedaddy.to/",
+    "https://daddylive.mp/"
+];
+
 const CHANNEL_ID = "premium537";
+
+// Agente HTTPS que ignora certificados raros (común en servidores rusos)
+const agent = new https.Agent({  
+  rejectUnauthorized: false
+});
 
 // ==========================================
 // 1. GESTIÓN DE TOKENS
@@ -21,175 +35,161 @@ let tokenExpiry = 0;
 async function getToken() {
     const now = Date.now();
     if (cachedToken && now < tokenExpiry) return cachedToken;
+    
     console.log("🔄 Renovando Token...");
     try {
+        // Usamos el primer referer para obtener el token
         const response = await axios.get(`https://epicplayplay.cfd/premiumtv/daddyhd.php?id=${CHANNEL_ID}`, {
-            headers: { "User-Agent": USER_AGENT, "Referer": REFERER }
+            headers: { "User-Agent": USER_AGENT, "Referer": REFERERS[0] },
+            httpsAgent: agent
         });
-        const html = response.data;
-        const match = html.match(/const\s+AUTH_TOKEN\s*=\s*["'](eyJ[^"']+)["']/) || html.match(/Bearer\s+(eyJ[^"']+)/);
         
-        if (!match) throw new Error("No token found");
+        const html = response.data;
+        // Regex mejorada para capturar cualquier variación
+        const match = html.match(/const\s+AUTH_TOKEN\s*=\s*["'](eyJ[^"']+)["']/) || 
+                      html.match(/Bearer\s+(eyJ[^"']+)/) ||
+                      html.match(/token\s*:\s*["'](eyJ[^"']+)["']/);
+        
+        if (!match) throw new Error("No se pudo extraer el token del HTML");
         
         cachedToken = match[1];
         tokenExpiry = now + (10 * 60 * 1000); 
         return cachedToken;
     } catch (e) {
-        console.error("Error getting token:", e.message);
+        console.error("❌ Error obteniendo token:", e.message);
         return cachedToken || ""; 
     }
 }
 
 // ==========================================
-// 2. BUSCADOR DE SERVIDOR (LA MEJORA V7)
+// 2. BUSCADOR DE SERVIDOR (BRUTE FORCE)
 // ==========================================
-// Si el servidor oficial falla, probamos estos de reserva
-const FALLBACK_SERVERS = [
-    "dokko1", "dokko2", "dokko3", "top1", "chevy"
+const SERVERS_LIST = [
+    "dokko1", "dokko2", "dokko3", "dokko4", // Servidores dokko
+    "top1", "top2",                         // Servidores top
+    "chevy", "ford"                         // Servidores antiguos
 ];
 
 async function getWorkingStreamUrl(token) {
-    // 1. Preguntar al servidor oficial cuál toca hoy
-    let candidates = [];
+    // 1. Intentamos consultar el Lookup oficial primero
+    let prioritizedServers = [];
     try {
         const lookup = await axios.get(`https://chevy.giokko.ru/server_lookup?channel_id=${CHANNEL_ID}`, {
-            headers: { "User-Agent": USER_AGENT, "Referer": REFERER }
+            headers: { "User-Agent": USER_AGENT, "Referer": REFERERS[0], "Origin": REFERERS[0] },
+            httpsAgent: agent
         });
-        const key = lookup.data.server_key;
-        if(key) candidates.push(key);
+        if(lookup.data && lookup.data.server_key) {
+            console.log(`ℹ️ Lookup oficial dice: ${lookup.data.server_key}`);
+            prioritizedServers.push(lookup.data.server_key);
+        }
     } catch (e) {
-        console.log("⚠️ Lookup falló, usando lista de reserva...");
+        console.log("⚠️ Lookup oficial falló, usando fuerza bruta.");
     }
 
-    // Añadimos los de reserva por si el oficial miente o falla
-    candidates = [...candidates, ...FALLBACK_SERVERS];
-    // Eliminamos duplicados
-    candidates = [...new Set(candidates)];
+    // Combinamos oficial + lista manual
+    const candidates = [...new Set([...prioritizedServers, ...SERVERS_LIST])];
+    
+    console.log(`🔎 Iniciando escaneo de servidores...`);
 
-    console.log(`🔎 Probando servidores: ${candidates.join(", ")}`);
-
-    // 2. Probar uno por uno hasta que uno responda 200 OK
     for (const server of candidates) {
-        let testUrl = "";
-        if (server === 'top1' || server === 'top1/cdn') {
-            testUrl = `https://top1.kiko2.ru/top1/cdn/${CHANNEL_ID}/mono.css`;
-        } else {
-            // Limpiamos el nombre por si viene sucio
-            const cleanServer = server.replace("/cdn", "");
-            testUrl = `https://${cleanServer}new.kiko2.ru/${cleanServer}/${CHANNEL_ID}/mono.css?.m3u8`;
-        }
+        // Construimos 2 variantes de URL por cada servidor
+        let urlsToTry = [];
+        
+        // Variante A: dokko1new.kiko2.ru
+        const cleanServer = server.replace("/cdn", "");
+        urlsToTry.push(`https://${cleanServer}new.kiko2.ru/${cleanServer}/${CHANNEL_ID}/mono.css?.m3u8`);
+        
+        // Variante B: top1.kiko2.ru (Sin 'new')
+        urlsToTry.push(`https://${cleanServer}.kiko2.ru/${cleanServer}/cdn/${CHANNEL_ID}/mono.css`);
 
-        try {
-            // Hacemos una petición ligera (HEAD o GET con rango pequeño) para ver si existe
-            await axios.get(testUrl, {
-                headers: { 
-                    "User-Agent": USER_AGENT, 
-                    "Referer": REFERER,
-                    "Authorization": `Bearer ${token}`,
-                    "Cookie": `eplayer_session=${token}`
-                },
-                timeout: 3000 // Solo esperamos 3 segundos por servidor
-            });
-            
-            console.log(`✅ Servidor encontrado: ${server}`);
-            return testUrl; // ¡Encontrado! Devolvemos este.
-        } catch (e) {
-            console.log(`❌ ${server} falló (${e.response ? e.response.status : 'timeout'})`);
-            // Si falla, el bucle continúa con el siguiente
+        for (const testUrl of urlsToTry) {
+            try {
+                // Probamos con HEAD para ser rápidos
+                await axios.head(testUrl, {
+                    headers: { 
+                        "User-Agent": USER_AGENT, 
+                        "Referer": REFERERS[0],
+                        "Origin": REFERERS[0],
+                        "Authorization": `Bearer ${token}`
+                    },
+                    httpsAgent: agent,
+                    timeout: 2500
+                });
+                
+                console.log(`✅ ¡BINGO! Servidor encontrado: ${testUrl}`);
+                return testUrl; // Retornamos la primera que funcione
+            } catch (e) {
+                // Si falla, solo logueamos en modo debug corto
+                // console.log(`❌ Falló: ${testUrl} (${e.response?.status || 'timeout'})`);
+            }
         }
     }
 
-    throw new Error("Ningún servidor funciona ahora mismo");
+    console.error("❌ TODOS los servidores fallaron.");
+    throw new Error("Stream offline o bloqueado");
 }
 
 // ==========================================
-// 3. DEFINICIÓN DEL MANIFIESTO
-// ==========================================
-const MANIFEST = {
-    id: "org.adrian.carrera.v7",
-    version: "3.1.0",
-    name: "Carrera Viva (Smart Failover)",
-    description: "Conexión V7 con búsqueda automática",
-    logo: "https://img.freepik.com/vector-gratis/fondo-carreras-formula-1-bandera-cuadros_1017-31486.jpg",
-    resources: ["catalog", "meta", "stream"],
-    types: ["tv"],
-    catalogs: [{ type: "tv", id: "carrera_catalog", name: "Carrera TV" }]
-};
-
-// ==========================================
-// 4. RUTAS EXPRESS
+// 3. RUTAS EXPRESS
 // ==========================================
 
-app.get("/", (req, res) => {
-    res.send("✅ Servidor V7 Activo (Smart Failover). Añade /manifest.json en Stremio.");
-});
+app.get("/", (req, res) => res.send("✅ Proxy V8 Activo."));
 
 app.get("/manifest.json", (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.json(MANIFEST);
+    res.json({
+        id: "org.adrian.carrera.v8",
+        version: "3.2.0",
+        name: "Carrera Viva (BruteForce)",
+        description: "Búsqueda intensiva de servidores",
+        logo: "https://img.freepik.com/vector-gratis/fondo-carreras-formula-1-bandera-cuadros_1017-31486.jpg",
+        resources: ["catalog", "meta", "stream"],
+        types: ["tv"],
+        catalogs: [{ type: "tv", id: "carrera_catalog", name: "Carrera TV" }]
+    });
 });
 
 app.get("/catalog/tv/carrera_catalog.json", (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.json({
-        metas: [{
-            id: "carrera_viva",
-            type: "tv",
-            name: "Carrera Viva (F1)",
-            poster: "https://img.freepik.com/vector-gratis/fondo-carreras-formula-1-bandera-cuadros_1017-31486.jpg",
-            description: "Directo con búsqueda automática de señal."
-        }]
-    });
+    res.json({ metas: [{ id: "carrera_viva", type: "tv", name: "Carrera Viva (F1)", poster: "https://img.freepik.com/vector-gratis/fondo-carreras-formula-1-bandera-cuadros_1017-31486.jpg" }] });
 });
 
 app.get("/meta/tv/carrera_viva.json", (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.json({
-        meta: {
-            id: "carrera_viva",
-            type: "tv",
-            name: "Carrera Viva (F1)",
-            poster: "https://img.freepik.com/vector-gratis/fondo-carreras-formula-1-bandera-cuadros_1017-31486.jpg",
-            background: "https://img.freepik.com/foto-gratis/coche-carreras-pista_1048-5244.jpg"
-        }
-    });
+    res.json({ meta: { id: "carrera_viva", type: "tv", name: "Carrera Viva (F1)", poster: "https://img.freepik.com/vector-gratis/fondo-carreras-formula-1-bandera-cuadros_1017-31486.jpg" } });
 });
 
 app.get("/stream/tv/carrera_viva.json", async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    const myUrl = `${BASE_URL}/playlist.m3u8`;
-    res.json({
-        streams: [{
-            title: "🔴 LIVE | Auto-Server | 1080p",
-            url: myUrl
-        }]
-    });
+    res.json({ streams: [{ title: "🔴 LIVE | Auto-Scan | 1080p", url: `${BASE_URL}/playlist.m3u8` }] });
 });
 
 // ==========================================
-// 5. PROXY INTELIGENTE
+// 4. PROXY DE VIDEO (FINAL)
 // ==========================================
 
 app.get("/playlist.m3u8", async (req, res) => {
     try {
         const token = await getToken();
-        // AQUÍ ESTÁ LA MAGIA: Buscamos la URL que sí funciona
+        // Buscamos la URL válida
         const targetUrl = await getWorkingStreamUrl(token);
         
-        console.log(`🔌 Conectando stream real: ${targetUrl}`);
+        console.log(`🔌 Streaming desde: ${targetUrl}`);
 
         const response = await axios.get(targetUrl, {
             headers: { 
                 "User-Agent": USER_AGENT, 
-                "Referer": REFERER, 
-                "Authorization": `Bearer ${token}`, 
-                "Cookie": `eplayer_session=${token}` 
-            }
+                "Referer": REFERERS[0], 
+                "Authorization": `Bearer ${token}`,
+                "Cookie": `eplayer_session=${token}` // Importante para dokko servers
+            },
+            httpsAgent: agent
         });
 
         let playlist = response.data;
         const encodedToken = encodeURIComponent(token);
         
+        // Reescritura de segmentos
         playlist = playlist.replace(/(https?:\/\/[^\s]+)/g, (match) => {
             return `${BASE_URL}/segment?target=${encodeURIComponent(match)}&t=${encodedToken}`;
         });
@@ -197,38 +197,41 @@ app.get("/playlist.m3u8", async (req, res) => {
         res.set("Content-Type", "application/vnd.apple.mpegurl");
         res.set("Access-Control-Allow-Origin", "*");
         res.send(playlist);
+
     } catch (e) {
-        console.error("Playlist Error:", e.message);
-        res.status(404).send("#EXTM3U\n#EXT-X-ERROR: Stream not found or offline");
+        console.error("Playlist Error (Final):", e.message);
+        res.status(500).send("#EXTM3U\n#EXT-X-ERROR: Stream Offline");
     }
 });
 
 app.get("/segment", async (req, res) => {
     const { target, t } = req.query;
-    if (!target || !t) return res.status(400).send("Bad Request");
+    if (!target) return res.status(400).send("Bad Request");
 
     try {
+        // Rotamos referers si falla (básico)
         const response = await axios({
             method: 'get',
             url: target,
             responseType: 'stream',
             headers: { 
                 "User-Agent": USER_AGENT, 
-                "Referer": REFERER, 
-                "Authorization": `Bearer ${t}`, 
-                "Cookie": `eplayer_session=${t}` 
-            }
+                "Referer": REFERERS[0], 
+                "Authorization": `Bearer ${t}`,
+                "Cookie": `eplayer_session=${t}`
+            },
+            httpsAgent: agent
         });
         
         res.set("Content-Type", response.headers["content-type"]);
         res.set("Access-Control-Allow-Origin", "*");
         response.data.pipe(res);
     } catch (e) {
-        // console.error("Seg Error");
+        // Silencioso para no saturar logs
         res.status(500).end();
     }
 });
 
 app.listen(PORT, () => {
-    console.log(`✅ Servidor V7 (Smart Failover) corriendo en ${BASE_URL}`);
+    console.log(`✅ Servidor V8 (BruteForce) corriendo en ${BASE_URL}`);
 });
