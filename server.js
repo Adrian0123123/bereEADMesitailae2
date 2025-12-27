@@ -6,45 +6,41 @@ const { addonBuilder } = require("stremio-addon-sdk");
 const app = express();
 app.use(cors());
 
-// --- CONSTANTES ---
 const PORT = process.env.PORT || 7000;
-// URL base de tu servidor (Render la asignará automáticamente, pero necesitamos detectarla)
 const BASE_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
 
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const REFERER = "https://epicplayplay.cfd/";
 
-// Cache simple para no pedir el token en cada segmento (dura 10 mins)
+// ==========================================
+// 1. LÓGICA DEL PROXY (Robar el video)
+// ==========================================
 let cachedToken = null;
 let tokenExpiry = 0;
 
-// --- FUNCIÓN PARA OBTENER EL TOKEN (Scraping) ---
 async function getToken() {
     const now = Date.now();
     if (cachedToken && now < tokenExpiry) return cachedToken;
-
     console.log("🔄 Renovando Token...");
     try {
         const response = await axios.get("https://epicplayplay.cfd/premiumtv/daddyhd.php?id=premium537", {
             headers: { "User-Agent": USER_AGENT, "Referer": REFERER }
         });
-        
         const html = response.data;
-        const tokenRegex = /const\s+AUTH_TOKEN\s*=\s*["'](eyJ[^"']+)["']/;
-        const match = html.match(tokenRegex) || html.match(/Bearer\s+(eyJ[^"']+)/);
+        // Buscamos el token con varios patrones por seguridad
+        const match = html.match(/const\s+AUTH_TOKEN\s*=\s*["'](eyJ[^"']+)["']/) || html.match(/Bearer\s+(eyJ[^"']+)/);
         
-        if (!match) throw new Error("No token found");
+        if (!match) throw new Error("No token found in HTML");
         
         cachedToken = match[1];
-        tokenExpiry = now + (10 * 60 * 1000); // Guardar por 10 min
+        tokenExpiry = now + (10 * 60 * 1000); // Guardar en memoria 10 min
         return cachedToken;
     } catch (e) {
         console.error("Error getting token:", e.message);
-        return cachedToken || ""; // Devolver el viejo si falla
+        return cachedToken || ""; // Si falla, intenta devolver el viejo
     }
 }
 
-// --- FUNCIÓN PARA BUSCAR EL SERVIDOR (Server Lookup) ---
 async function getServerUrl() {
     try {
         const lookup = await axios.get("https://chevy.giokko.ru/server_lookup?channel_id=premium537", {
@@ -55,17 +51,18 @@ async function getServerUrl() {
         return `https://${key}new.kiko2.ru/${key}/premium537/mono.css?.m3u8`;
     } catch (e) {
         console.error("Lookup failed:", e.message);
-        // Fallback por si acaso
         return "https://dokko1new.kiko2.ru/dokko1/premium537/mono.css?.m3u8";
     }
 }
 
-// --- CONFIGURACIÓN DEL ADDON ---
+// ==========================================
+// 2. DEFINICIÓN DEL ADDON (Menú de Stremio)
+// ==========================================
 const builder = new addonBuilder({
     id: "org.adrian.carrera.proxy",
-    version: "2.0.5",
-    name: "Carrera Viva (Proxy Mode)",
-    description: "Proxy Tunneling para saltar bloqueo 403",
+    version: "2.1.5",
+    name: "Carrera Viva (Proxy V3)",
+    description: "Proxy Tunneling Final",
     resources: ["catalog", "meta", "stream"],
     types: ["tv"],
     catalogs: [{ type: "tv", id: "carrera_catalog", name: "Carrera TV" }]
@@ -78,7 +75,7 @@ builder.defineCatalogHandler((args) => {
             type: "tv",
             name: "Carrera Viva (Proxy)",
             poster: "https://img.freepik.com/vector-gratis/fondo-carreras-formula-1-bandera-cuadros_1017-31486.jpg",
-            description: "Funciona 100% pasando por Proxy."
+            description: "Live Proxy Mode"
         }]
     });
 });
@@ -96,102 +93,118 @@ builder.defineMetaHandler((args) => {
 
 builder.defineStreamHandler(async (args) => {
     if (args.id === "carrera_viva") {
-        // En lugar de dar la URL rusa, damos LA URL DE NUESTRO PROPIO SERVIDOR
-        // Stremio -> Render (/playlist.m3u8)
+        // Aquí redirigimos a NUESTRO servidor proxy
         const myUrl = `${BASE_URL}/playlist.m3u8`;
-        return {
-            streams: [{
-                title: "🔴 LIVE | Proxy Mode",
-                url: myUrl
-            }]
-        };
+        return { streams: [{ title: "🔴 LIVE | Proxy Mode", url: myUrl }] };
     }
     return { streams: [] };
 });
 
-// --- RUTAS DEL SERVIDOR EXPRESS (LA MAGIA) ---
+const addonInterface = builder.getInterface();
 
-// 1. Ruta para servir el MANIFEST (lista de reproducción modificada)
+// ==========================================
+// 3. RUTAS DEL SERVIDOR (Express)
+// ==========================================
+
+// A. RUTA BASE
+app.get("/", (req, res) => {
+    res.send("✅ Servidor Proxy Activo. Usa /manifest.json en Stremio.");
+});
+
+// B. RUTAS DEL PROXY (Aquí ocurre la magia del video)
 app.get("/playlist.m3u8", async (req, res) => {
     try {
         const token = await getToken();
         const targetUrl = await getServerUrl();
         
-        // Descargamos el m3u8 original
         const response = await axios.get(targetUrl, {
-            headers: {
-                "User-Agent": USER_AGENT,
-                "Referer": REFERER,
-                "Authorization": `Bearer ${token}`,
-                "Cookie": `eplayer_session=${token}`
+            headers: { 
+                "User-Agent": USER_AGENT, 
+                "Referer": REFERER, 
+                "Authorization": `Bearer ${token}`, 
+                "Cookie": `eplayer_session=${token}` 
             }
         });
 
         let playlist = response.data;
-
-        // REESCRIBIMOS EL M3U8:
-        // Buscamos todas las URLs (https://chevy...) y las cambiamos por NUESTRA url (/segment?url=...)
-        // Así Stremio nos pedirá los trozos a nosotros, no a los rusos.
         const encodedToken = encodeURIComponent(token);
         
-        // Regex para capturar líneas que empiezan por http
+        // Reemplazamos los links rusos por links a nuestro /segment
         playlist = playlist.replace(/(https?:\/\/[^\s]+)/g, (match) => {
             return `${BASE_URL}/segment?target=${encodeURIComponent(match)}&t=${encodedToken}`;
         });
 
         res.set("Content-Type", "application/vnd.apple.mpegurl");
         res.send(playlist);
-
     } catch (e) {
-        console.error("Error proxying playlist:", e.message);
-        res.status(500).send("Error fetching playlist");
+        console.error("Proxy Playlist Error:", e.message);
+        res.status(500).send("Error generating playlist");
     }
 });
 
-// 2. Ruta para servir los SEGMENTOS (Video)
 app.get("/segment", async (req, res) => {
-    const target = req.query.target;
-    const token = req.query.t;
-
-    if (!target || !token) return res.status(400).send("Missing params");
+    const { target, t } = req.query;
+    if (!target || !t) return res.status(400).send("Bad Request");
 
     try {
-        // Hacemos un Stream (tubería) directo desde Rusia a Stremio
         const response = await axios({
             method: 'get',
             url: target,
-            responseType: 'stream', // Importante: bajamos el video como flujo de datos
-            headers: {
-                "User-Agent": USER_AGENT,
-                "Referer": REFERER,
-                "Authorization": `Bearer ${token}`,
-                "Cookie": `eplayer_session=${token}`
+            responseType: 'stream',
+            headers: { 
+                "User-Agent": USER_AGENT, 
+                "Referer": REFERER, 
+                "Authorization": `Bearer ${t}`, 
+                "Cookie": `eplayer_session=${t}` 
             }
         });
-
-        // Copiamos los headers del video original
-        res.set("Content-Type", response.headers["content-type"]);
         
-        // Conectamos la tubería
+        res.set("Content-Type", response.headers["content-type"]);
         response.data.pipe(res);
-
     } catch (e) {
-        console.error("Error proxying segment:", e.message);
+        console.error("Proxy Segment Error:", e.message);
         res.status(500).send("Error fetching segment");
     }
 });
 
-// Conectar el SDK de Stremio al servidor Express
-const addonInterface = builder.getInterface();
-app.use((req, res, next) => {
-    if (req.path.startsWith("/playlist") || req.path.startsWith("/segment")) {
-        next();
-    } else {
-        // El resto de rutas las maneja el SDK de Stremio
-        addonInterface(req, res, next);
-    }
+// C. RUTAS DE STREMIO (Conectadas MANUALMENTE para evitar errores)
+
+// 1. El Manifiesto
+app.get("/manifest.json", (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*'); // Importante para Stremio
+    res.json(addonInterface.manifest);
 });
 
+// 2. Manejador de recursos (Catalog, Meta, Stream)
+app.get("/:resource/:type/:id/:extra?.json", (req, res) => {
+    const { resource, type, id, extra } = req.params;
+    
+    // Ignoramos si la ruta choca con playlist.m3u8 (por seguridad)
+    if (resource === 'playlist.m3u8') return;
+
+    const args = {
+        resource,
+        type,
+        id,
+        extra: extra ? JSON.parse(decodeURIComponent(extra)) : {}
+    };
+
+    addonInterface.get(args)
+        .then(resp => {
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            if (resp.redirect) {
+                res.redirect(resp.redirect);
+            } else {
+                res.json(resp);
+            }
+        })
+        .catch(err => {
+            console.error("Addon Handler Error:", err);
+            res.status(500).json({ err: "Handler error" });
+        });
+});
+
+// Arrancar servidor
 app.listen(PORT, () => {
     console.log(`✅ Add-on Proxy corriendo en ${BASE_URL}`);
 });
