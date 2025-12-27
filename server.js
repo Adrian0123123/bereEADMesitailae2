@@ -7,6 +7,7 @@ const app = express();
 app.use(cors());
 
 const PORT = process.env.PORT || 7000;
+// Detectar URL de Render o usar localhost
 const BASE_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
 
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
@@ -27,17 +28,16 @@ async function getToken() {
             headers: { "User-Agent": USER_AGENT, "Referer": REFERER }
         });
         const html = response.data;
-        // Buscamos el token con varios patrones por seguridad
         const match = html.match(/const\s+AUTH_TOKEN\s*=\s*["'](eyJ[^"']+)["']/) || html.match(/Bearer\s+(eyJ[^"']+)/);
         
         if (!match) throw new Error("No token found in HTML");
         
         cachedToken = match[1];
-        tokenExpiry = now + (10 * 60 * 1000); // Guardar en memoria 10 min
+        tokenExpiry = now + (10 * 60 * 1000); 
         return cachedToken;
     } catch (e) {
         console.error("Error getting token:", e.message);
-        return cachedToken || ""; // Si falla, intenta devolver el viejo
+        return cachedToken || ""; 
     }
 }
 
@@ -56,12 +56,12 @@ async function getServerUrl() {
 }
 
 // ==========================================
-// 2. DEFINICIÓN DEL ADDON (Menú de Stremio)
+// 2. DEFINICIÓN DEL ADDON
 // ==========================================
 const builder = new addonBuilder({
     id: "org.adrian.carrera.proxy",
-    version: "2.1.5",
-    name: "Carrera Viva (Proxy V3)",
+    version: "2.2.0",
+    name: "Carrera Viva (Proxy V4)",
     description: "Proxy Tunneling Final",
     resources: ["catalog", "meta", "stream"],
     types: ["tv"],
@@ -93,7 +93,6 @@ builder.defineMetaHandler((args) => {
 
 builder.defineStreamHandler(async (args) => {
     if (args.id === "carrera_viva") {
-        // Aquí redirigimos a NUESTRO servidor proxy
         const myUrl = `${BASE_URL}/playlist.m3u8`;
         return { streams: [{ title: "🔴 LIVE | Proxy Mode", url: myUrl }] };
     }
@@ -103,15 +102,48 @@ builder.defineStreamHandler(async (args) => {
 const addonInterface = builder.getInterface();
 
 // ==========================================
-// 3. RUTAS DEL SERVIDOR (Express)
+// 3. RUTAS EXPRESS (La solución al Error 500)
 // ==========================================
 
-// A. RUTA BASE
+// A. Ruta Base (Para que no de error al entrar al link principal)
 app.get("/", (req, res) => {
-    res.send("✅ Servidor Proxy Activo. Usa /manifest.json en Stremio.");
+    res.send("✅ Servidor Activo. Copia el link y añade /manifest.json para Stremio.");
 });
 
-// B. RUTAS DEL PROXY (Aquí ocurre la magia del video)
+// B. Ruta del Manifiesto (Stremio la pide primero)
+app.get("/manifest.json", (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.json(addonInterface.manifest);
+});
+
+// C. Ruta para Catalog, Meta y Stream (Stremio las pide después)
+app.get("/:resource/:type/:id/:extra?.json", (req, res, next) => {
+    const { resource, type, id, extra } = req.params;
+    
+    // Si la ruta es playlist.m3u8, pasa al siguiente manejador (el proxy)
+    if (resource === 'playlist.m3u8' || resource === 'segment') {
+        return next();
+    }
+
+    const args = {
+        resource,
+        type,
+        id,
+        extra: extra ? JSON.parse(decodeURIComponent(extra)) : {}
+    };
+
+    addonInterface.get(args)
+        .then(resp => {
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            res.json(resp);
+        })
+        .catch(err => {
+            console.error("Error en Addon Handler:", err);
+            res.status(500).json({ error: "Internal Error" });
+        });
+});
+
+// D. RUTAS DEL PROXY DE VIDEO (Donde ocurre la magia)
 app.get("/playlist.m3u8", async (req, res) => {
     try {
         const token = await getToken();
@@ -129,12 +161,12 @@ app.get("/playlist.m3u8", async (req, res) => {
         let playlist = response.data;
         const encodedToken = encodeURIComponent(token);
         
-        // Reemplazamos los links rusos por links a nuestro /segment
         playlist = playlist.replace(/(https?:\/\/[^\s]+)/g, (match) => {
             return `${BASE_URL}/segment?target=${encodeURIComponent(match)}&t=${encodedToken}`;
         });
 
         res.set("Content-Type", "application/vnd.apple.mpegurl");
+        res.set("Access-Control-Allow-Origin", "*");
         res.send(playlist);
     } catch (e) {
         console.error("Proxy Playlist Error:", e.message);
@@ -160,6 +192,7 @@ app.get("/segment", async (req, res) => {
         });
         
         res.set("Content-Type", response.headers["content-type"]);
+        res.set("Access-Control-Allow-Origin", "*");
         response.data.pipe(res);
     } catch (e) {
         console.error("Proxy Segment Error:", e.message);
@@ -167,44 +200,7 @@ app.get("/segment", async (req, res) => {
     }
 });
 
-// C. RUTAS DE STREMIO (Conectadas MANUALMENTE para evitar errores)
-
-// 1. El Manifiesto
-app.get("/manifest.json", (req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*'); // Importante para Stremio
-    res.json(addonInterface.manifest);
-});
-
-// 2. Manejador de recursos (Catalog, Meta, Stream)
-app.get("/:resource/:type/:id/:extra?.json", (req, res) => {
-    const { resource, type, id, extra } = req.params;
-    
-    // Ignoramos si la ruta choca con playlist.m3u8 (por seguridad)
-    if (resource === 'playlist.m3u8') return;
-
-    const args = {
-        resource,
-        type,
-        id,
-        extra: extra ? JSON.parse(decodeURIComponent(extra)) : {}
-    };
-
-    addonInterface.get(args)
-        .then(resp => {
-            res.setHeader('Access-Control-Allow-Origin', '*');
-            if (resp.redirect) {
-                res.redirect(resp.redirect);
-            } else {
-                res.json(resp);
-            }
-        })
-        .catch(err => {
-            console.error("Addon Handler Error:", err);
-            res.status(500).json({ err: "Handler error" });
-        });
-});
-
 // Arrancar servidor
 app.listen(PORT, () => {
-    console.log(`✅ Add-on Proxy corriendo en ${BASE_URL}`);
+    console.log(`✅ Add-on Proxy V4 corriendo en ${BASE_URL}`);
 });
