@@ -7,14 +7,13 @@ const app = express();
 app.use(cors());
 
 const PORT = process.env.PORT || 7000;
-// Detectar URL de Render o usar localhost
 const BASE_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
 
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const REFERER = "https://epicplayplay.cfd/";
 
 // ==========================================
-// 1. LÓGICA DEL PROXY (Robar el video)
+// 1. LÓGICA DEL PROXY (Igual que antes)
 // ==========================================
 let cachedToken = null;
 let tokenExpiry = 0;
@@ -30,7 +29,7 @@ async function getToken() {
         const html = response.data;
         const match = html.match(/const\s+AUTH_TOKEN\s*=\s*["'](eyJ[^"']+)["']/) || html.match(/Bearer\s+(eyJ[^"']+)/);
         
-        if (!match) throw new Error("No token found in HTML");
+        if (!match) throw new Error("No token found");
         
         cachedToken = match[1];
         tokenExpiry = now + (10 * 60 * 1000); 
@@ -56,99 +55,94 @@ async function getServerUrl() {
 }
 
 // ==========================================
-// 2. DEFINICIÓN DEL ADDON
+// 2. DEFINICIÓN DEL MANIFIESTO
 // ==========================================
+// Solo usamos el builder para generar el JSON del manifiesto, no para manejar rutas.
 const builder = new addonBuilder({
-    id: "org.adrian.carrera.proxy",
-    version: "2.2.0",
-    name: "Carrera Viva (Proxy V4)",
-    description: "Proxy Tunneling Final",
+    id: "org.adrian.carrera.manual",
+    version: "3.0.0",
+    name: "Carrera Viva (Final)",
+    description: "Conexión directa V5",
     resources: ["catalog", "meta", "stream"],
     types: ["tv"],
     catalogs: [{ type: "tv", id: "carrera_catalog", name: "Carrera TV" }]
 });
 
-builder.defineCatalogHandler((args) => {
-    return Promise.resolve({
+const MANIFEST = builder.getInterface().manifest;
+
+// ==========================================
+// 3. RUTAS EXPRESS MANUALES (Aquí arreglamos el error)
+// ==========================================
+
+// A. Ruta Base
+app.get("/", (req, res) => {
+    res.send("✅ Servidor V5 Activo. Añade /manifest.json en Stremio.");
+});
+
+// B. Ruta Manifiesto
+app.get("/manifest.json", (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.json(MANIFEST);
+});
+
+// C. Ruta CATÁLOGO (Lo que muestra el icono en el menú)
+// Stremio pide: /catalog/tv/carrera_catalog.json
+app.get("/catalog/tv/carrera_catalog.json", (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.json({
         metas: [{
             id: "carrera_viva",
             type: "tv",
-            name: "Carrera Viva (Proxy)",
+            name: "Carrera Viva (Directo)",
             poster: "https://img.freepik.com/vector-gratis/fondo-carreras-formula-1-bandera-cuadros_1017-31486.jpg",
-            description: "Live Proxy Mode"
+            description: "Emisión en directo vía Proxy"
         }]
     });
 });
 
-builder.defineMetaHandler((args) => {
-    return Promise.resolve({
+// D. Ruta META (Detalles al hacer clic)
+// Stremio pide: /meta/tv/carrera_viva.json
+app.get("/meta/tv/carrera_viva.json", (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.json({
         meta: {
             id: "carrera_viva",
             type: "tv",
-            name: "Carrera Viva (Proxy)",
-            poster: "https://img.freepik.com/vector-gratis/fondo-carreras-formula-1-bandera-cuadros_1017-31486.jpg"
+            name: "Carrera Viva (Directo)",
+            poster: "https://img.freepik.com/vector-gratis/fondo-carreras-formula-1-bandera-cuadros_1017-31486.jpg",
+            background: "https://img.freepik.com/foto-gratis/coche-carreras-pista_1048-5244.jpg",
+            description: "Canal en vivo con bypass de seguridad."
         }
     });
 });
 
-builder.defineStreamHandler(async (args) => {
-    if (args.id === "carrera_viva") {
-        const myUrl = `${BASE_URL}/playlist.m3u8`;
-        return { streams: [{ title: "🔴 LIVE | Proxy Mode", url: myUrl }] };
-    }
-    return { streams: [] };
-});
-
-const addonInterface = builder.getInterface();
-
-// ==========================================
-// 3. RUTAS EXPRESS (La solución al Error 500)
-// ==========================================
-
-// A. Ruta Base (Para que no de error al entrar al link principal)
-app.get("/", (req, res) => {
-    res.send("✅ Servidor Activo. Copia el link y añade /manifest.json para Stremio.");
-});
-
-// B. Ruta del Manifiesto (Stremio la pide primero)
-app.get("/manifest.json", (req, res) => {
+// E. Ruta STREAM (El enlace del video)
+// Stremio pide: /stream/tv/carrera_viva.json
+app.get("/stream/tv/carrera_viva.json", async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.json(addonInterface.manifest);
-});
-
-// C. Ruta para Catalog, Meta y Stream (Stremio las pide después)
-app.get("/:resource/:type/:id/:extra?.json", (req, res, next) => {
-    const { resource, type, id, extra } = req.params;
     
-    // Si la ruta es playlist.m3u8, pasa al siguiente manejador (el proxy)
-    if (resource === 'playlist.m3u8' || resource === 'segment') {
-        return next();
-    }
-
-    const args = {
-        resource,
-        type,
-        id,
-        extra: extra ? JSON.parse(decodeURIComponent(extra)) : {}
-    };
-
-    addonInterface.get(args)
-        .then(resp => {
-            res.setHeader('Access-Control-Allow-Origin', '*');
-            res.json(resp);
-        })
-        .catch(err => {
-            console.error("Error en Addon Handler:", err);
-            res.status(500).json({ error: "Internal Error" });
-        });
+    // Aquí generamos el enlace que pasa por NUESTRO proxy
+    const myUrl = `${BASE_URL}/playlist.m3u8`;
+    
+    res.json({
+        streams: [{
+            title: "🔴 LIVE | 1080p | Proxy Mode",
+            url: myUrl
+        }]
+    });
 });
 
-// D. RUTAS DEL PROXY DE VIDEO (Donde ocurre la magia)
+// ==========================================
+// 4. RUTAS DEL PROXY (Video Real)
+// ==========================================
+
 app.get("/playlist.m3u8", async (req, res) => {
     try {
         const token = await getToken();
         const targetUrl = await getServerUrl();
         
+        console.log(`🔌 Conectando a: ${targetUrl}`); // Log para ver qué pasa
+
         const response = await axios.get(targetUrl, {
             headers: { 
                 "User-Agent": USER_AGENT, 
@@ -161,6 +155,7 @@ app.get("/playlist.m3u8", async (req, res) => {
         let playlist = response.data;
         const encodedToken = encodeURIComponent(token);
         
+        // Reemplazar enlaces rusos por enlaces a nuestro servidor
         playlist = playlist.replace(/(https?:\/\/[^\s]+)/g, (match) => {
             return `${BASE_URL}/segment?target=${encodeURIComponent(match)}&t=${encodedToken}`;
         });
@@ -195,12 +190,11 @@ app.get("/segment", async (req, res) => {
         res.set("Access-Control-Allow-Origin", "*");
         response.data.pipe(res);
     } catch (e) {
-        console.error("Proxy Segment Error:", e.message);
-        res.status(500).send("Error fetching segment");
+        // console.error("Segment Error"); // Descomentar solo si hay muchos fallos
+        res.status(500).send("Error");
     }
 });
 
-// Arrancar servidor
 app.listen(PORT, () => {
-    console.log(`✅ Add-on Proxy V4 corriendo en ${BASE_URL}`);
+    console.log(`✅ Servidor V5 Manual corriendo en ${BASE_URL}`);
 });
