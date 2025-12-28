@@ -14,10 +14,11 @@ const TOKEN_ID = "537";
 const STREAM_ID = "premium537";
 const TARGET_PLAYLIST = `https://dokko1new.kiko2.ru/dokko1/${STREAM_ID}/mono.css`;
 const JINA_API_KEY = "jina_0aca8b7a41c64d0db846b0369a969256qawCmkgGlS-NnJH2sIfV2pRq0d3p"; 
-
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
 
-// --- MOTOR CURL (Solo para el Token inicial, que funciona bien) ---
+// VARIABLE GLOBAL
+let GLOBAL_TOKEN = "";
+
 function runCurl(url, headers = {}) {
     return new Promise((resolve, reject) => {
         const args = ['-s', '-L', '--insecure', '--http1.1'];
@@ -38,16 +39,31 @@ function runCurl(url, headers = {}) {
 
 async function getToken() {
     try {
+        console.log("🔍 [TOKEN] Iniciando descarga...");
         const buffer = await runCurl(`https://epicplayplay.cfd/premiumtv/daddyhd.php?id=${TOKEN_ID}`, {
             "User-Agent": UA,
             "Referer": "https://epicplayplay.cfd/"
         });
         const html = buffer.toString();
         const match = html.match(/const\s+AUTH_TOKEN\s*=\s*["'](eyJ[^"']+)["']/) || html.match(/Bearer\s+(eyJ[^"']+)/);
-        if (!match) throw new Error("No token found");
-        return match[1].trim();
+        
+        if (!match) throw new Error("No token pattern match");
+        
+        let rawToken = match[1];
+        
+        // LOG FORENSE DEL TOKEN
+        console.log(`🔎 [TOKEN RAW] Longitud: ${rawToken.length}`);
+        
+        // LIMPIEZA EXTREMA: Quitamos saltos de línea, retornos de carro y espacios
+        GLOBAL_TOKEN = rawToken.replace(/[\n\r\s]/g, "");
+        
+        console.log(`✅ [TOKEN FINAL] Guardado en memoria.`);
+        console.log(`   Longitud: ${GLOBAL_TOKEN.length}`);
+        console.log(`   Inicio: ${GLOBAL_TOKEN.substring(0, 5)}... Fin: ...${GLOBAL_TOKEN.slice(-5)}`);
+        
+        return GLOBAL_TOKEN;
     } catch (e) {
-        console.error("❌ Error Token:", e.message);
+        console.error("❌ [TOKEN ERROR]", e.message);
         return "";
     }
 }
@@ -61,7 +77,7 @@ async function getPlaylistViaJina(targetUrl) {
         const response = await axios.get(jinaUrl, { headers });
         let text = response.data;
         const startIndex = text.indexOf("#EXTM3U");
-        if (startIndex === -1) throw new Error("Jina invalid response");
+        if (startIndex === -1) throw new Error("Jina devolvió HTML/Error, no m3u8");
         text = text.substring(startIndex);
         text = text.replace(/```/g, "");
         return text;
@@ -79,9 +95,9 @@ function getBaseUrl(req) {
 app.get("/manifest.json", (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.json({
-        id: "org.adrian.cloud.v35",
-        version: "10.0.0",
-        name: "Carrera Viva (Axios Native)",
+        id: "org.adrian.cloud.v37",
+        version: "12.0.0",
+        name: "Carrera Viva (CSI Logs)",
         resources: ["catalog", "meta", "stream"],
         types: ["tv"],
         catalogs: [{ type: "tv", id: "carrera_catalog", name: "Carrera TV" }]
@@ -101,35 +117,38 @@ app.get("/meta/tv/carrera_viva.json", (req, res) => {
 app.get("/stream/tv/carrera_viva.json", async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     const baseUrl = getBaseUrl(req);
-    res.json({ streams: [{ title: "🔴 LIVE | V35 Axios", url: `${baseUrl}/playlist.m3u8` }] });
+    res.json({ streams: [{ title: "🔴 LIVE | V37 Logs", url: `${baseUrl}/playlist.m3u8` }] });
 });
 
 app.get("/playlist.m3u8", async (req, res) => {
     try {
-        console.log("☁️ Stremio pide lista...");
-        const token = await getToken();
+        console.log("☁️ [STREMIO] Pide lista...");
+        await getToken();
         
         let playlist = "";
         try {
             playlist = await getPlaylistViaJina(TARGET_PLAYLIST);
         } catch (e) {
-            // Fallback
-            const buffer = await runCurl(TARGET_PLAYLIST, { "User-Agent": UA, "Referer": "[https://epicplayplay.cfd/](https://epicplayplay.cfd/)", "Authorization": `Bearer ${token}` });
+            console.error("⚠️ [JINA FALLÓ]", e.message);
+            const buffer = await runCurl(TARGET_PLAYLIST, { "User-Agent": UA, "Referer": "[https://epicplayplay.cfd/](https://epicplayplay.cfd/)", "Authorization": `Bearer ${GLOBAL_TOKEN}` });
             playlist = buffer.toString();
         }
 
-        if (!playlist.includes("#EXTM3U")) return res.status(500).send("#EXTM3U\n#EXT-X-ERROR: Blocked");
+        if (!playlist.includes("#EXTM3U")) {
+            console.error("☠️ [LISTA] Contenido inválido recibido.");
+            return res.status(500).send("#EXTM3U\n#EXT-X-ERROR: Blocked");
+        }
 
-        const encodedToken = encodeURIComponent(token);
         const baseUrl = getBaseUrl(req);
-        
-        console.log(`📝 Lista OK. Generando enlaces...`);
+        console.log(`📝 [LISTA] OK. Enlaces apuntando a memoria global.`);
 
+        // NOTA: Ya no pasamos el token en la URL, solo type=key
         playlist = playlist.replace(/URI="(https?:\/\/[^"]+)"/g, (match, url) => {
-            return `URI="${baseUrl}/proxy?target=${encodeURIComponent(url)}&t=${encodedToken}&type=key"`;
+            return `URI="${baseUrl}/proxy?target=${encodeURIComponent(url)}&type=key"`;
         });
+
         playlist = playlist.replace(/^(https?:\/\/[^\s]+)$/gm, (match) => {
-            return `${baseUrl}/proxy?target=${encodeURIComponent(match)}&t=${encodedToken}&type=video`;
+            return `${baseUrl}/proxy?target=${encodeURIComponent(match)}&type=video`;
         });
 
         res.set("Content-Type", "application/vnd.apple.mpegurl");
@@ -141,48 +160,53 @@ app.get("/playlist.m3u8", async (req, res) => {
     }
 });
 
-// --- EL CAMBIO MAGISTRAL: AXIOS PARA LA LLAVE ---
 app.get("/proxy", async (req, res) => {
-    const { target, t, type } = req.query;
+    const { target, type } = req.query;
 
     if (type === 'key') {
-        const cleanToken = t.trim();
-        console.log(`🔐 AXIOS pidiendo LLAVE...`); 
+        console.log(`🔐 [AXIOS] Pidiendo LLAVE...`); 
 
+        if (!GLOBAL_TOKEN) {
+            console.error("❌ [MEMORIA] Token vacío. Renovando de emergencia...");
+            await getToken();
+        }
+
+        // LOG FORENSE DE CABECERAS
+        console.log(`   Token usado: ${GLOBAL_TOKEN.substring(0,10)}... (Len: ${GLOBAL_TOKEN.length})`);
+        
         try {
-            // Usamos AXIOS en lugar de CURL.
-            // Axios maneja las cabeceras de forma nativa en Node.js, sin errores de bash.
             const response = await axios({
                 method: 'get',
                 url: target,
-                responseType: 'arraybuffer', // IMPORTANTE: Pedimos datos binarios puros
+                responseType: 'arraybuffer',
                 headers: {
                     "User-Agent": UA,
                     "Referer": "[https://epicplayplay.cfd/](https://epicplayplay.cfd/)",
                     "Origin": "[https://epicplayplay.cfd](https://epicplayplay.cfd)",
-                    "Cookie": `eplayer_session=${cleanToken}`,
-                    "Authorization": `Bearer ${cleanToken}`
+                    "Cookie": `eplayer_session=${GLOBAL_TOKEN}`,
+                    "Authorization": `Bearer ${GLOBAL_TOKEN}`
                 },
-                // Equivalente a --insecure
                 httpsAgent: new https.Agent({ rejectUnauthorized: false })
             });
 
             const buffer = response.data;
-
             if (buffer.length !== 16) {
-                console.log(`⚠️ ERROR (${buffer.length} bytes): ${buffer.toString()}`);
+                console.log(`⚠️ [RESPUESTA RARA] Longitud: ${buffer.length} bytes.`);
+                console.log(`📜 Contenido: ${buffer.toString()}`);
                 return res.status(500).end();
             }
 
-            console.log(`🔓 ¡Llave OK! (16 bytes)`);
+            console.log(`🔓 [LLAVE OK] ¡Descargada y enviada!`);
             res.set("Access-Control-Allow-Origin", "*");
             res.set("Content-Type", "application/octet-stream");
             return res.send(buffer);
 
         } catch (e) {
-            console.error("❌ Axios Error Key:", e.message);
-            if(e.response) {
-                console.error("   Datos Servidor:", e.response.data.toString());
+            console.error(`❌ [AXIOS ERROR] ${e.message}`);
+            if (e.response) {
+                console.error(`   Status: ${e.response.status}`);
+                console.error(`   Data: ${e.response.data.toString()}`);
+                // console.error(`   Headers Sent:`, e.config.headers); // Descomentar si necesitamos ver todo
             }
             return res.status(500).end();
         }
@@ -205,5 +229,5 @@ app.get("/proxy", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`✅ CLOUD V35 (AXIOS NATIVE) ACTIVO`);
+    console.log(`✅ CLOUD V37 (CSI LOGS) ACTIVO`);
 });
