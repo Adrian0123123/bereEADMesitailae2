@@ -49,7 +49,6 @@ async function getToken() {
     }
 }
 
-// --- NUEVA LÓGICA DE LIMPIEZA AGRESIVA ---
 async function getPlaylistViaJina(targetUrl) {
     const jinaUrl = `https://r.jina.ai/${targetUrl}`;
     const headers = { "User-Agent": UA, "X-Retain-Images": "none" };
@@ -57,26 +56,15 @@ async function getPlaylistViaJina(targetUrl) {
 
     try {
         const response = await axios.get(jinaUrl, { headers });
-        const rawText = response.data;
-
-        // 1. Separar por líneas
-        const lines = rawText.split('\n');
+        let text = response.data;
         
-        // 2. Filtrar solo líneas válidas de M3U8
-        const cleanLines = lines.filter(line => {
-            const trimmed = line.trim();
-            // Nos quedamos solo con lo que empieza por # (comandos) o http (enlaces)
-            return trimmed.startsWith('#') || trimmed.startsWith('http');
-        });
-
-        // 3. Asegurar que la primera línea sea #EXTM3U (Vital para Stremio)
-        if (cleanLines.length > 0 && !cleanLines[0].includes("#EXTM3U")) {
-            cleanLines.unshift("#EXTM3U");
-        }
-
-        // 4. Reconstruir
-        return cleanLines.join('\n');
-
+        // --- LIMPIEZA AGRESIVA ---
+        const startIndex = text.indexOf("#EXTM3U");
+        if (startIndex === -1) throw new Error("Jina no devolvió una lista válida");
+        text = text.substring(startIndex);
+        text = text.replace(/```/g, "");
+        
+        return text;
     } catch (e) {
         throw new Error(`Jina Failed: ${e.message}`);
     }
@@ -91,9 +79,9 @@ function getBaseUrl(req) {
 app.get("/manifest.json", (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.json({
-        id: "org.adrian.cloud.v30",
-        version: "5.0.0",
-        name: "Carrera Viva (Jina Perfect Cleaner)",
+        id: "org.adrian.cloud.v31",
+        version: "6.0.0",
+        name: "Carrera Viva (Diagnóstico Final)",
         resources: ["catalog", "meta", "stream"],
         types: ["tv"],
         catalogs: [{ type: "tv", id: "carrera_catalog", name: "Carrera TV" }]
@@ -102,40 +90,43 @@ app.get("/manifest.json", (req, res) => {
 
 app.get("/catalog/tv/carrera_catalog.json", (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.json({ metas: [{ id: "carrera_viva", type: "tv", name: "Carrera Viva", poster: "https://img.freepik.com/vector-gratis/fondo-carreras-formula-1-bandera-cuadros_1017-31486.jpg" }] });
+    res.json({ metas: [{ id: "carrera_viva", type: "tv", name: "Carrera Viva", poster: "[https://img.freepik.com/vector-gratis/fondo-carreras-formula-1-bandera-cuadros_1017-31486.jpg](https://img.freepik.com/vector-gratis/fondo-carreras-formula-1-bandera-cuadros_1017-31486.jpg)" }] });
 });
 
 app.get("/meta/tv/carrera_viva.json", (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.json({ meta: { id: "carrera_viva", type: "tv", name: "Carrera Viva", poster: "https://img.freepik.com/vector-gratis/fondo-carreras-formula-1-bandera-cuadros_1017-31486.jpg" } });
+    res.json({ meta: { id: "carrera_viva", type: "tv", name: "Carrera Viva", poster: "[https://img.freepik.com/vector-gratis/fondo-carreras-formula-1-bandera-cuadros_1017-31486.jpg](https://img.freepik.com/vector-gratis/fondo-carreras-formula-1-bandera-cuadros_1017-31486.jpg)" } });
 });
 
 app.get("/stream/tv/carrera_viva.json", async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     const baseUrl = getBaseUrl(req);
-    res.json({ streams: [{ title: "🔴 LIVE | Jina V30", url: `${baseUrl}/playlist.m3u8` }] });
+    res.json({ streams: [{ title: "🔴 LIVE | Diagnóstico Final", url: `${baseUrl}/playlist.m3u8` }] });
 });
 
 app.get("/playlist.m3u8", async (req, res) => {
     try {
         console.log("☁️ Stremio pide lista...");
         const token = await getToken();
-        
-        // Obtenemos y LIMPIAMOS la lista de Jina
-        let playlist = await getPlaylistViaJina(TARGET_PLAYLIST);
+        let playlist = "";
+        try {
+            playlist = await getPlaylistViaJina(TARGET_PLAYLIST);
+        } catch (e) {
+            console.error("Jina error, fallback curl...");
+            const buffer = await runCurl(TARGET_PLAYLIST, { "User-Agent": UA, "Referer": "[https://epicplayplay.cfd/](https://epicplayplay.cfd/)", "Authorization": `Bearer ${token}` });
+            playlist = buffer.toString();
+        }
 
-        // Verificación de seguridad
-        if (!playlist.includes("#EXTINF")) {
-            console.error("❌ La lista limpiada parece vacía o inválida.");
-            return res.status(500).send("#EXTM3U\n#EXT-X-ERROR: Empty List from Jina");
+        if (!playlist.includes("#EXTM3U")) {
+            console.error("❌ Lista corrupta.");
+            return res.status(500).send("#EXTM3U\n#EXT-X-ERROR: Blocked");
         }
 
         const encodedToken = encodeURIComponent(token);
         const baseUrl = getBaseUrl(req);
         
-        console.log(`📝 Lista limpia y válida (${playlist.length} chars). Reescribiendo...`);
+        console.log(`📝 Lista OK. Reescribiendo...`);
 
-        // REESCRITURA
         playlist = playlist.replace(/URI="(https?:\/\/[^"]+)"/g, (match, url) => {
             return `URI="${baseUrl}/proxy?target=${encodeURIComponent(url)}&t=${encodedToken}&type=key"`;
         });
@@ -149,28 +140,29 @@ app.get("/playlist.m3u8", async (req, res) => {
         res.send(playlist);
 
     } catch (e) {
-        console.error("🔥 Error Playlist:", e.message);
         res.status(500).send("#EXTM3U\n#EXT-X-ERROR: " + e.message);
     }
 });
 
+// --- AQUÍ ESTÁ EL DIAGNÓSTICO ---
 app.get("/proxy", async (req, res) => {
     const { target, t, type } = req.query;
 
     if (type === 'key') {
-        // AQUÍ ES LA PRUEBA DE FUEGO DEL BLOQUEO DE IP
         console.log(`🔐 Stremio pide LLAVE...`); 
         try {
             const buffer = await runCurl(target, {
                 "User-Agent": UA,
-                "Referer": "https://epicplayplay.cfd/",
-                "Origin": "https://epicplayplay.cfd",
+                "Referer": "[https://epicplayplay.cfd/](https://epicplayplay.cfd/)",
+                "Origin": "[https://epicplayplay.cfd](https://epicplayplay.cfd)",
                 "Cookie": `eplayer_session=${t}`,
                 "Authorization": `Bearer ${t}`
             });
 
             if (buffer.length !== 16) {
-                console.log(`⚠️ Llave corrupta o bloqueo IP (${buffer.length} bytes).`);
+                console.log(`⚠️ ERROR BLOQUEO IP (${buffer.length} bytes).`);
+                // ESTA LÍNEA ES LA QUE TE DIRÁ LA VERDAD EN LOS LOGS
+                console.log(`📜 EL MENSAJE DEL SERVIDOR ES: "${buffer.toString()}"`); 
                 return res.status(500).end(); 
             }
 
@@ -201,5 +193,5 @@ app.get("/proxy", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`✅ CLOUD V30 (CLEANER) ACTIVO`);
+    console.log(`✅ CLOUD V31 (DIAGNÓSTICO) ACTIVO`);
 });
