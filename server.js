@@ -1,7 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
-const { spawn } = require("child_process");
+const { spawn } = require("child_process"); // Usamos SPAWN que es más seguro para Linux
 const https = require("https");
 
 const app = express();
@@ -9,7 +9,6 @@ app.use(cors());
 
 const PORT = process.env.PORT || 7000;
 
-// --- CONFIGURACIÓN ---
 const TOKEN_ID = "537";
 const STREAM_ID = "premium537";
 const TARGET_PLAYLIST = `https://dokko1new.kiko2.ru/dokko1/${STREAM_ID}/mono.css`;
@@ -17,23 +16,22 @@ const JINA_API_KEY = "jina_0aca8b7a41c64d0db846b0369a969256qawCmkgGlS-NnJH2sIfV2
 
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
 
-// --- MOTOR CURL V32 (SPAWN - LINUX SAFE) ---
-// Esta versión no usa "string" para el comando, sino arrays de argumentos.
-// Esto evita que caracteres raros en el token rompan el comando en Linux.
+// --- MOTOR CURL (LINUX ROBUST MODE) ---
 function runCurl(url, headers = {}) {
     return new Promise((resolve, reject) => {
-        const args = ['-s', '-L', '--insecure']; // Argumentos base
-
-        // Añadimos cabeceras una a una de forma segura
+        // Construimos el array de argumentos para evitar problemas de comillas en shell
+        const args = ['-s', '-L', '--insecure'];
+        
         for (const [key, value] of Object.entries(headers)) {
             args.push('-H');
             args.push(`${key}: ${value}`);
         }
-
-        // URL al final
+        
         args.push(url);
 
-        // Ejecutamos CURL directamente sin shell intermedia
+        // Debug: Ver qué estamos enviando exactamente
+        // console.log("➡️ Ejecutando CURL a:", url);
+
         const child = spawn('curl', args);
 
         let stdoutChunks = [];
@@ -45,15 +43,12 @@ function runCurl(url, headers = {}) {
         child.on('close', (code) => {
             if (code !== 0) {
                 const errorMsg = Buffer.concat(stderrChunks).toString();
-                console.error("CURL Exit Code:", code, errorMsg);
-                reject(new Error(`Curl exited with code ${code}`));
+                console.error(`❌ CURL Falló (Code ${code}):`, errorMsg);
+                reject(new Error(`Curl exit code: ${code}`));
             } else {
-                const result = Buffer.concat(stdoutChunks);
-                resolve(result);
+                resolve(Buffer.concat(stdoutChunks));
             }
         });
-
-        child.on('error', (err) => reject(err));
     });
 }
 
@@ -73,24 +68,32 @@ async function getToken() {
     }
 }
 
+// --- JINA OPTIMIZADO (RAW MODE) ---
 async function getPlaylistViaJina(targetUrl) {
     const jinaUrl = `https://r.jina.ai/${targetUrl}`;
-    const headers = { "User-Agent": UA, "X-Retain-Images": "none" };
+    
+    const headers = { 
+        "User-Agent": UA, 
+        "X-Retain-Images": "none",
+        "X-Respond-With": "text" // Pedimos texto plano explícitamente
+    };
+    
     if (JINA_API_KEY) headers["Authorization"] = `Bearer ${JINA_API_KEY}`;
 
     try {
         const response = await axios.get(jinaUrl, { headers });
         let text = response.data;
         
-        // Limpieza quirúrgica de Jina
+        // Limpieza
         const startIndex = text.indexOf("#EXTM3U");
-        if (startIndex === -1) throw new Error("Jina no devolvió una lista válida");
+        if (startIndex === -1) throw new Error("Jina no devolvió formato m3u8");
+        
         text = text.substring(startIndex);
-        text = text.replace(/```/g, ""); // Quitar marcas de markdown si quedan
+        text = text.replace(/```/g, "");
         
         return text;
     } catch (e) {
-        throw new Error(`Jina Failed: ${e.message}`);
+        throw new Error(`Jina Error: ${e.message}`);
     }
 }
 
@@ -103,9 +106,9 @@ function getBaseUrl(req) {
 app.get("/manifest.json", (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.json({
-        id: "org.adrian.cloud.v32",
-        version: "7.0.0",
-        name: "Carrera Viva (Spawn Engine)",
+        id: "org.adrian.cloud.v33",
+        version: "8.0.0",
+        name: "Carrera Viva (Debug Mode)",
         resources: ["catalog", "meta", "stream"],
         types: ["tv"],
         catalogs: [{ type: "tv", id: "carrera_catalog", name: "Carrera TV" }]
@@ -125,7 +128,7 @@ app.get("/meta/tv/carrera_viva.json", (req, res) => {
 app.get("/stream/tv/carrera_viva.json", async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     const baseUrl = getBaseUrl(req);
-    res.json({ streams: [{ title: "🔴 LIVE | Spawn Safe", url: `${baseUrl}/playlist.m3u8` }] });
+    res.json({ streams: [{ title: "🔴 LIVE | V33 Debug", url: `${baseUrl}/playlist.m3u8` }] });
 });
 
 app.get("/playlist.m3u8", async (req, res) => {
@@ -137,23 +140,22 @@ app.get("/playlist.m3u8", async (req, res) => {
         try {
             playlist = await getPlaylistViaJina(TARGET_PLAYLIST);
         } catch (e) {
-            console.error("Jina error, fallback curl...", e.message);
-            // Fallback
+            console.error("Jina falló, intentando curl...", e.message);
             const buffer = await runCurl(TARGET_PLAYLIST, { "User-Agent": UA, "Referer": "[https://epicplayplay.cfd/](https://epicplayplay.cfd/)", "Authorization": `Bearer ${token}` });
             playlist = buffer.toString();
         }
 
         if (!playlist.includes("#EXTM3U")) {
-            console.error("❌ Lista corrupta.");
+            console.error("❌ Lista corrupta/bloqueada.");
             return res.status(500).send("#EXTM3U\n#EXT-X-ERROR: Blocked");
         }
 
         const encodedToken = encodeURIComponent(token);
         const baseUrl = getBaseUrl(req);
         
-        console.log(`📝 Lista OK. Reescribiendo...`);
+        console.log(`📝 Lista OK. Reescribiendo URLs...`);
 
-        // REESCRITURA
+        // IMPORTANTE: encodeURIComponent asegura que la URL destino viaja segura
         playlist = playlist.replace(/URI="(https?:\/\/[^"]+)"/g, (match, url) => {
             return `URI="${baseUrl}/proxy?target=${encodeURIComponent(url)}&t=${encodedToken}&type=key"`;
         });
@@ -171,13 +173,18 @@ app.get("/playlist.m3u8", async (req, res) => {
     }
 });
 
+// --- EL SUPER PROXY DEPURADOR ---
 app.get("/proxy", async (req, res) => {
     const { target, t, type } = req.query;
 
     if (type === 'key') {
-        console.log(`🔐 Stremio pide LLAVE...`); 
+        console.log(`🔐 Pidiendo LLAVE...`);
+        
+        // LOG VITAL: ¿Qué estamos pidiendo exactamente?
+        console.log(`   URL Objetivo: ${target}`);
+        console.log(`   Token (primeros 10 chars): ${t.substring(0, 10)}...`);
+
         try {
-            // Usamos el nuevo motor runCurl (Spawn)
             const buffer = await runCurl(target, {
                 "User-Agent": UA,
                 "Referer": "[https://epicplayplay.cfd/](https://epicplayplay.cfd/)",
@@ -187,20 +194,18 @@ app.get("/proxy", async (req, res) => {
             });
 
             if (buffer.length !== 16) {
-                console.log(`⚠️ ERROR TAMAÑO (${buffer.length} bytes).`);
-                // Si vuelve a salir "Malformed", es un misterio mayor, 
-                // pero si sale 404/403 es bloqueo de IP.
-                console.log(`📜 RESPUESTA: "${buffer.toString()}"`); 
+                console.log(`⚠️ ERROR (${buffer.length} bytes). Respuesta:`);
+                console.log(buffer.toString()); // AQUÍ SALDRÁ EL ERROR RUSO EXACTO
                 return res.status(500).end(); 
             }
 
-            console.log(`🔓 ¡Llave OK! (16 bytes)`);
+            console.log(`🔓 ¡Llave OK!`);
             res.set("Access-Control-Allow-Origin", "*");
             res.set("Content-Type", "application/octet-stream");
             return res.send(buffer);
 
         } catch (e) {
-            console.error("Error Key:", e.message);
+            console.error("Excepción Curl:", e.message);
             return res.status(500).end();
         }
     }
@@ -222,5 +227,5 @@ app.get("/proxy", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`✅ CLOUD V32 (SPAWN SAFE) ACTIVO`);
+    console.log(`✅ CLOUD V33 (DEBUG LOGS) ACTIVO`);
 });
