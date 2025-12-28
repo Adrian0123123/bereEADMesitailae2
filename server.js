@@ -35,14 +35,13 @@ function runCurl(url, headers = {}) {
 
 async function getToken() {
     try {
-        // console.log("🔍 Paso 1: Token..."); 
         const buffer = await runCurl(`https://epicplayplay.cfd/premiumtv/daddyhd.php?id=${TOKEN_ID}`, {
             "User-Agent": UA,
             "Referer": "https://epicplayplay.cfd/"
         });
         const html = buffer.toString();
         const match = html.match(/const\s+AUTH_TOKEN\s*=\s*["'](eyJ[^"']+)["']/) || html.match(/Bearer\s+(eyJ[^"']+)/);
-        if (!match) throw new Error("No token");
+        if (!match) throw new Error("No token found");
         return match[1];
     } catch (e) {
         console.error("❌ Error Token:", e.message);
@@ -50,38 +49,51 @@ async function getToken() {
     }
 }
 
+// --- NUEVA LÓGICA DE LIMPIEZA AGRESIVA ---
 async function getPlaylistViaJina(targetUrl) {
-    // console.log(`🤖 Paso 2: Jina...`);
     const jinaUrl = `https://r.jina.ai/${targetUrl}`;
     const headers = { "User-Agent": UA, "X-Retain-Images": "none" };
     if (JINA_API_KEY) headers["Authorization"] = `Bearer ${JINA_API_KEY}`;
 
     try {
         const response = await axios.get(jinaUrl, { headers });
-        let text = response.data;
-        text = text.replace(/```[a-z]*\n/g, "").replace(/```/g, "");
-        text = text.split('\n').filter(line => line.trim() !== '').join('\n');
-        return text;
+        const rawText = response.data;
+
+        // 1. Separar por líneas
+        const lines = rawText.split('\n');
+        
+        // 2. Filtrar solo líneas válidas de M3U8
+        const cleanLines = lines.filter(line => {
+            const trimmed = line.trim();
+            // Nos quedamos solo con lo que empieza por # (comandos) o http (enlaces)
+            return trimmed.startsWith('#') || trimmed.startsWith('http');
+        });
+
+        // 3. Asegurar que la primera línea sea #EXTM3U (Vital para Stremio)
+        if (cleanLines.length > 0 && !cleanLines[0].includes("#EXTM3U")) {
+            cleanLines.unshift("#EXTM3U");
+        }
+
+        // 4. Reconstruir
+        return cleanLines.join('\n');
+
     } catch (e) {
         throw new Error(`Jina Failed: ${e.message}`);
     }
 }
 
-// --- FUNCIÓN CRÍTICA: FORZAR HTTPS ---
 function getBaseUrl(req) {
     const host = req.headers.host;
-    // En Render siempre es HTTPS
     if (host.includes("onrender.com")) return `https://${host}`;
-    // Fallback por si acaso
-    return `https://${host}`;
+    return `http://${host}`;
 }
 
 app.get("/manifest.json", (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.json({
-        id: "org.adrian.cloud.v28",
-        version: "3.0.0",
-        name: "Carrera Viva (Jina + HTTPS)",
+        id: "org.adrian.cloud.v30",
+        version: "5.0.0",
+        name: "Carrera Viva (Jina Perfect Cleaner)",
         resources: ["catalog", "meta", "stream"],
         types: ["tv"],
         catalogs: [{ type: "tv", id: "carrera_catalog", name: "Carrera TV" }]
@@ -101,7 +113,7 @@ app.get("/meta/tv/carrera_viva.json", (req, res) => {
 app.get("/stream/tv/carrera_viva.json", async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     const baseUrl = getBaseUrl(req);
-    res.json({ streams: [{ title: "🔴 LIVE | Cloud Jina", url: `${baseUrl}/playlist.m3u8` }] });
+    res.json({ streams: [{ title: "🔴 LIVE | Jina V30", url: `${baseUrl}/playlist.m3u8` }] });
 });
 
 app.get("/playlist.m3u8", async (req, res) => {
@@ -109,27 +121,21 @@ app.get("/playlist.m3u8", async (req, res) => {
         console.log("☁️ Stremio pide lista...");
         const token = await getToken();
         
-        let playlist = "";
-        try {
-            playlist = await getPlaylistViaJina(TARGET_PLAYLIST);
-        } catch (e) {
-            console.error("Jina falló, intentando curl...");
-            // Fallback (seguramente fallará en cloud, pero por si acaso)
-            const buffer = await runCurl(TARGET_PLAYLIST, { "User-Agent": UA, "Referer": "https://epicplayplay.cfd/", "Authorization": `Bearer ${token}` });
-            playlist = buffer.toString();
-        }
+        // Obtenemos y LIMPIAMOS la lista de Jina
+        let playlist = await getPlaylistViaJina(TARGET_PLAYLIST);
 
-        if (!playlist.includes("#EXTM3U")) {
-            console.error("❌ Lista inválida.");
-            return res.status(500).send("#EXTM3U\n#EXT-X-ERROR: Invalid List");
+        // Verificación de seguridad
+        if (!playlist.includes("#EXTINF")) {
+            console.error("❌ La lista limpiada parece vacía o inválida.");
+            return res.status(500).send("#EXTM3U\n#EXT-X-ERROR: Empty List from Jina");
         }
 
         const encodedToken = encodeURIComponent(token);
         const baseUrl = getBaseUrl(req);
         
-        console.log(`📝 Escribiendo URLs seguras: ${baseUrl}`);
+        console.log(`📝 Lista limpia y válida (${playlist.length} chars). Reescribiendo...`);
 
-        // REESCRITURA CON BASE URL SEGURA
+        // REESCRITURA
         playlist = playlist.replace(/URI="(https?:\/\/[^"]+)"/g, (match, url) => {
             return `URI="${baseUrl}/proxy?target=${encodeURIComponent(url)}&t=${encodedToken}&type=key"`;
         });
@@ -152,7 +158,8 @@ app.get("/proxy", async (req, res) => {
     const { target, t, type } = req.query;
 
     if (type === 'key') {
-        console.log(`🔐 Stremio ha pedido la LLAVE (¡Bien!). Conectando a Rusia...`);
+        // AQUÍ ES LA PRUEBA DE FUEGO DEL BLOQUEO DE IP
+        console.log(`🔐 Stremio pide LLAVE...`); 
         try {
             const buffer = await runCurl(target, {
                 "User-Agent": UA,
@@ -163,18 +170,16 @@ app.get("/proxy", async (req, res) => {
             });
 
             if (buffer.length !== 16) {
-                console.log(`⚠️ Llave corrupta (${buffer.length} bytes). Rusia bloquea IP Render.`);
-                // console.log(buffer.toString());
+                console.log(`⚠️ Llave corrupta o bloqueo IP (${buffer.length} bytes).`);
                 return res.status(500).end(); 
             }
 
-            console.log(`🔓 ¡Llave OK! Enviando a Stremio...`);
+            console.log(`🔓 ¡Llave OK!`);
             res.set("Access-Control-Allow-Origin", "*");
             res.set("Content-Type", "application/octet-stream");
             return res.send(buffer);
 
         } catch (e) {
-            console.error("Error Llave:", e.message);
             return res.status(500).end();
         }
     }
@@ -196,5 +201,5 @@ app.get("/proxy", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`✅ SERVIDOR V28 (HTTPS + JINA) ACTIVO`);
+    console.log(`✅ CLOUD V30 (CLEANER) ACTIVO`);
 });
