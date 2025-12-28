@@ -17,37 +17,21 @@ const JINA_API_KEY = "jina_0aca8b7a41c64d0db846b0369a969256qawCmkgGlS-NnJH2sIfV2
 
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
 
-// --- MOTOR CURL MEJORADO (HTTP1.1 + CLEAN) ---
+// --- MOTOR CURL (Solo para el Token inicial, que funciona bien) ---
 function runCurl(url, headers = {}) {
     return new Promise((resolve, reject) => {
-        // Añadimos --http1.1 para evitar problemas de protocolo con headers sucios
         const args = ['-s', '-L', '--insecure', '--http1.1'];
-        
         for (const [key, value] of Object.entries(headers)) {
-            // LIMPIEZA CRÍTICA: Quitamos espacios y saltos de línea de las cabeceras
-            const cleanValue = String(value).trim();
             args.push('-H');
-            args.push(`${key}: ${cleanValue}`);
+            args.push(`${key}: ${value}`);
         }
-        
-        args.push(url.trim());
-
+        args.push(url);
         const child = spawn('curl', args);
-
         let stdoutChunks = [];
-        let stderrChunks = [];
-
         child.stdout.on('data', (chunk) => stdoutChunks.push(chunk));
-        child.stderr.on('data', (chunk) => stderrChunks.push(chunk));
-
         child.on('close', (code) => {
-            if (code !== 0) {
-                const errorMsg = Buffer.concat(stderrChunks).toString();
-                console.error(`❌ Curl Error (Code ${code}):`, errorMsg);
-                reject(new Error(`Curl exit code: ${code}`));
-            } else {
-                resolve(Buffer.concat(stdoutChunks));
-            }
+            if (code !== 0) reject(new Error(`Curl exit code: ${code}`));
+            else resolve(Buffer.concat(stdoutChunks));
         });
     });
 }
@@ -61,9 +45,7 @@ async function getToken() {
         const html = buffer.toString();
         const match = html.match(/const\s+AUTH_TOKEN\s*=\s*["'](eyJ[^"']+)["']/) || html.match(/Bearer\s+(eyJ[^"']+)/);
         if (!match) throw new Error("No token found");
-        
-        // ¡LIMPIEZA AQUÍ! Quitamos cualquier basura del final
-        return match[1].trim(); 
+        return match[1].trim();
     } catch (e) {
         console.error("❌ Error Token:", e.message);
         return "";
@@ -72,22 +54,16 @@ async function getToken() {
 
 async function getPlaylistViaJina(targetUrl) {
     const jinaUrl = `https://r.jina.ai/${targetUrl}`;
-    const headers = { 
-        "User-Agent": UA, 
-        "X-Retain-Images": "none",
-        "X-Respond-With": "text"
-    };
+    const headers = { "User-Agent": UA, "X-Retain-Images": "none", "X-Respond-With": "text" };
     if (JINA_API_KEY) headers["Authorization"] = `Bearer ${JINA_API_KEY}`;
 
     try {
         const response = await axios.get(jinaUrl, { headers });
         let text = response.data;
-        
         const startIndex = text.indexOf("#EXTM3U");
         if (startIndex === -1) throw new Error("Jina invalid response");
         text = text.substring(startIndex);
         text = text.replace(/```/g, "");
-        
         return text;
     } catch (e) {
         throw new Error(`Jina Error: ${e.message}`);
@@ -103,9 +79,9 @@ function getBaseUrl(req) {
 app.get("/manifest.json", (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.json({
-        id: "org.adrian.cloud.v34",
-        version: "9.0.0",
-        name: "Carrera Viva (Sanitized)",
+        id: "org.adrian.cloud.v35",
+        version: "10.0.0",
+        name: "Carrera Viva (Axios Native)",
         resources: ["catalog", "meta", "stream"],
         types: ["tv"],
         catalogs: [{ type: "tv", id: "carrera_catalog", name: "Carrera TV" }]
@@ -125,7 +101,7 @@ app.get("/meta/tv/carrera_viva.json", (req, res) => {
 app.get("/stream/tv/carrera_viva.json", async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     const baseUrl = getBaseUrl(req);
-    res.json({ streams: [{ title: "🔴 LIVE | V34 Clean", url: `${baseUrl}/playlist.m3u8` }] });
+    res.json({ streams: [{ title: "🔴 LIVE | V35 Axios", url: `${baseUrl}/playlist.m3u8` }] });
 });
 
 app.get("/playlist.m3u8", async (req, res) => {
@@ -137,14 +113,12 @@ app.get("/playlist.m3u8", async (req, res) => {
         try {
             playlist = await getPlaylistViaJina(TARGET_PLAYLIST);
         } catch (e) {
-            console.error("Jina fail, curl fallback...");
+            // Fallback
             const buffer = await runCurl(TARGET_PLAYLIST, { "User-Agent": UA, "Referer": "[https://epicplayplay.cfd/](https://epicplayplay.cfd/)", "Authorization": `Bearer ${token}` });
             playlist = buffer.toString();
         }
 
-        if (!playlist.includes("#EXTM3U")) {
-            return res.status(500).send("#EXTM3U\n#EXT-X-ERROR: Blocked");
-        }
+        if (!playlist.includes("#EXTM3U")) return res.status(500).send("#EXTM3U\n#EXT-X-ERROR: Blocked");
 
         const encodedToken = encodeURIComponent(token);
         const baseUrl = getBaseUrl(req);
@@ -154,7 +128,6 @@ app.get("/playlist.m3u8", async (req, res) => {
         playlist = playlist.replace(/URI="(https?:\/\/[^"]+)"/g, (match, url) => {
             return `URI="${baseUrl}/proxy?target=${encodeURIComponent(url)}&t=${encodedToken}&type=key"`;
         });
-
         playlist = playlist.replace(/^(https?:\/\/[^\s]+)$/gm, (match) => {
             return `${baseUrl}/proxy?target=${encodeURIComponent(match)}&t=${encodedToken}&type=video`;
         });
@@ -168,27 +141,36 @@ app.get("/playlist.m3u8", async (req, res) => {
     }
 });
 
+// --- EL CAMBIO MAGISTRAL: AXIOS PARA LA LLAVE ---
 app.get("/proxy", async (req, res) => {
     const { target, t, type } = req.query;
 
     if (type === 'key') {
-        // LIMPIEZA CRÍTICA: Nos aseguramos de que el token no tenga basura
         const cleanToken = t.trim();
-        
-        console.log(`🔐 Pidiendo LLAVE...`); 
+        console.log(`🔐 AXIOS pidiendo LLAVE...`); 
 
         try {
-            const buffer = await runCurl(target, {
-                "User-Agent": UA,
-                "Referer": "[https://epicplayplay.cfd/](https://epicplayplay.cfd/)",
-                "Origin": "[https://epicplayplay.cfd](https://epicplayplay.cfd)",
-                "Cookie": `eplayer_session=${cleanToken}`,
-                "Authorization": `Bearer ${cleanToken}`
+            // Usamos AXIOS en lugar de CURL.
+            // Axios maneja las cabeceras de forma nativa en Node.js, sin errores de bash.
+            const response = await axios({
+                method: 'get',
+                url: target,
+                responseType: 'arraybuffer', // IMPORTANTE: Pedimos datos binarios puros
+                headers: {
+                    "User-Agent": UA,
+                    "Referer": "[https://epicplayplay.cfd/](https://epicplayplay.cfd/)",
+                    "Origin": "[https://epicplayplay.cfd](https://epicplayplay.cfd)",
+                    "Cookie": `eplayer_session=${cleanToken}`,
+                    "Authorization": `Bearer ${cleanToken}`
+                },
+                // Equivalente a --insecure
+                httpsAgent: new https.Agent({ rejectUnauthorized: false })
             });
+
+            const buffer = response.data;
 
             if (buffer.length !== 16) {
                 console.log(`⚠️ ERROR (${buffer.length} bytes): ${buffer.toString()}`);
-                // Si falla, reintentamos una vez más automáticamente
                 return res.status(500).end();
             }
 
@@ -198,7 +180,10 @@ app.get("/proxy", async (req, res) => {
             return res.send(buffer);
 
         } catch (e) {
-            console.error("Error Key:", e.message);
+            console.error("❌ Axios Error Key:", e.message);
+            if(e.response) {
+                console.error("   Datos Servidor:", e.response.data.toString());
+            }
             return res.status(500).end();
         }
     }
@@ -220,5 +205,5 @@ app.get("/proxy", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`✅ CLOUD V34 (SANITIZED) ACTIVO`);
+    console.log(`✅ CLOUD V35 (AXIOS NATIVE) ACTIVO`);
 });
